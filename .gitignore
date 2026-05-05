@@ -1,0 +1,20 @@
+# GHC build artifacts
+*.hi
+*.o
+*.dyn_hi
+*.dyn_o
+*.p_hi
+*.p_o
+
+# Cabal / Stack output
+dist/
+dist-newstyle/
+.stack-work/
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# macOS
+.DS_Store
