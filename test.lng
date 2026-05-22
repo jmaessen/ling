@@ -1,0 +1,37 @@
+/* Bootstrapping our way to glory! */
+// OK?
+infixr 10 ^^
+infixl 20 *
+infixl 20 /
+infix 20 <<
+infix 20 >>
+infixl 20 &
+infixl 20 ^
+infixl 30 +
+infixl 30 -
+infixl 30 |
+infix 40 <=
+infix 40 <
+infix 40 >
+infix 40 >=
+infix 40 ==
+infixr 50 &&
+infixr 60 ||
+infixr 90 ::
+infixr 90 <>
+
+Bool : Type = data { True; False }
+
+Integer : Type = data {}
+
+[a] : Type = data { (::) a [a]; []}
+
+map (f: 'a -> 'b) (a :: as) = f a :: map f as
+map (f: 'a -> 'b) [] = []
+
+a * b + c * d * e + f * g * h
+a && b && c
+a ^^ b ^^ c * d ^^ e
+a == b == c
+7 + { 13 }
+fn x = { x + 5 }
