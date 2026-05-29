@@ -1,0 +1,90 @@
+/* n-queens in ling */
+infixl 30 +
+infixl 30 -
+infix 40 <=
+infix 40 <
+infix 40 ==
+infixr 50 &&
+infixr 60 ||
+infixr 90 ::
+infixr 90 <>
+infixl 90 ++
+
+Bool : Type = data { False; True }
+Ordering : Type = data { LT; EQ; GT }
+Integer : Type
+String : Type
+
+(+) : Int -> Int -> Int = prim "+"
+(-) : Int -> Int -> Int = prim "-"
+(<=) : Int -> Int -> Bool = prim "<="
+(==) : Int -> Int -> Bool = prim "=="
+
+strConcat : [String] -> String = prim "strConcat"
+putStr : String -> () = prim "putStr"
+
+True || _ = True
+_ || b = b
+
+False && _ = False
+_ && b = b
+
+[a] : Type = data { (::) a [a]; []}
+
+fromTo : Int -> Int -> [Int]
+fromTo l u = if l <= u then l :: fromTo (l + 1) u else []
+
+(<>) : 'a -> 'a -> 'a
+[] <> b = b
+a <> [] = a
+(a::as) <> b = a :: as <> b
+
+map : ('a -> 'b) -> ['a] -> ['b]
+map f [] = []
+map f (x::xs) = f x :: map f xs
+
+concatMap : ('a -> ['b]) -> ['a] -> ['b]
+concatMap f [] = []
+concatMap f (x::xs) = f x <> concatMap f xs
+
+removes : ['a] -> [('a, ['a])]
+removes [] = []
+removes (a::as) = (a, as) :: map (fn (b, bs) = (b, a::bs)) (removes as)
+
+queens : Int -> [[Int]]
+queens n = queensFromTo n (fromTo 1 n)
+
+queensFromTo : Int -> [Int] -> [[Int]]
+queensFromTo 0 vs = [[]]
+queensFromTo c vs = concatMap (addCol (queensFromTo (c - 1))) (removes vs)
+
+addCol : ([Int] -> [[Int]]) -> (Int, [Int]) -> [[Int]]
+addCol qs (i, vs) = concatMap (addCol1 i) (qs vs)
+
+addCol1 : Int -> [Int] -> [[Int]]
+addCol1 i qs =
+  if isSafe (i + 1) (i - 1) qs then [i::qs] else []
+
+isSafe : Int -> Int -> [Int] -> Bool
+isSafe _ _ [] = True
+isSafe u d (n::ns) =
+  if n == u || n == d
+  then False
+  else isSafe (u + 1) (d - 1) ns
+
+show : [[Int]] -> String
+show as =
+  strConcat ("[" :: interShow shows "" ",\n " as ["]"])
+
+shows : [Int] -> [String] -> [String]
+shows as r = "[" :: interShow showsInt "" ", " as ("]" :: r)
+
+showsInt : Int -> [String] -> [String]
+showsInt i r = intToStr i :: r
+
+interShow :
+  ('a -> [String] -> [String]) -> String -> String -> ['a] -> [String] -> [String]
+interShow sh pre sep [] r = r
+interShow sh pre sep (a::as) r = pre :: sh a (interShow sh sep sep as r)
+
+putStr (show (queens 5))
