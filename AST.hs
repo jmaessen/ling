@@ -9,6 +9,9 @@ import Text.PrettyPrint(
   Doc, (<+>), ($$), lbrace, rbrace, brackets, double, hang, hcat, hsep, sep,
   int, integer, nest, parens, punctuate, vcat)
 
+noSpan :: Span
+noSpan = S 0 0
+
 -- A span is a pair of file offsets.
 data Span = S Int Int
   deriving (Show)
@@ -20,15 +23,12 @@ instance Eq Span where
 uSpan :: Span -> Span -> Span
 uSpan (S p0 _) (S _ p3) = S p0 p3
 
-type Id = (Span, ByteString)
-type Op = (Span, ByteString)
-type Con = (Span, ByteString)
-type ConOp = (Span, ByteString)
-
 data Mod = Mod SourcePos Defs Imports Defs
   deriving (Eq, Show)
 
 type Imports = [Import]
+
+type Id = (Span, ByteString)
 
 data Import = Import Span Id Defs
   deriving (Eq, Show)
@@ -42,18 +42,21 @@ data Def
   | Def Exp Exp
   | Data Exp Defs
   | Struct Exp Defs
-  | Fix FixDir Int Op
+  | Fix FixDir Int Id
+  deriving (Eq, Show)
+
+data OpOrIdent = Op | Ident
+  deriving (Eq, Show)
+
+data ConOrVar = Con | Var
   deriving (Eq, Show)
 
 data Exp
-  = Id Id
+  = Id Span OpOrIdent ConOrVar ByteString
   | App Span Exp [Exp]
   | Fn Span Exp Exp
   | Asc Span Exp Exp
   | Arrow Span Exp Exp
-  | Op Op
-  | Con Con
-  | ConOp ConOp
   | Wild Span
   | Const Span Constant
   | Ops Exp [(Exp, Exp)]
@@ -96,6 +99,7 @@ class IsAST t where
   isValid :: t -> ValidErrs
   span :: t -> Span
   fullParen :: t -> t
+  noParen :: t -> t
   pp :: t -> Doc
 
 
@@ -103,6 +107,7 @@ instance IsAST t => IsAST (Span, t) where
   isValid (_, t) = isValid t
   span (s, _) = s
   fullParen (s, t) = (s, fullParen t)
+  noParen (s, t) = (s, noParen t)
   pp (_, t) = pp t
 
 instance IsAST t => IsAST [t] where
@@ -111,6 +116,7 @@ instance IsAST t => IsAST [t] where
   span [a] = span a
   span (a:as) = span a `uSpan` span as
   fullParen ts = fullParen <$> ts
+  noParen ts = noParen <$> ts
   pp = vcat . fmap pp
 
 ppOp :: Exp -> Doc -> Exp -> Doc
@@ -124,14 +130,11 @@ ppDef lhs eq (Block (_, ds)) = (lhs <+> eq <+> lbrace) $$ vcat [nest 2 (pp ds), 
 ppDef lhs eq e = hang (lhs <+> eq) 2 (pp e)
 
 instance IsAST Exp where
-  isValid (Id _) = []
+  isValid (Id _ _ _ _) = []
   isValid (App _ e1 e2) = isValid e1 <> isValid e2
   isValid (Fn _ args body) = isArgs args <> isValid body
   isValid (Asc _ e t) = isValid e <> isTy t
   isValid (Arrow s _ _) = [(s, "Arrow type in expression")]
-  isValid (Op _) = []
-  isValid (Con _) = []
-  isValid (ConOp _) = []
   isValid (Wild s) = [(s, "Wildcard in expression")]
   isValid (Const _ _) = []
   isValid (Ops e ops) =
@@ -147,14 +150,11 @@ instance IsAST Exp where
   isValid (Assign _ l e) = isValid l <> isValid e
   isValid (Block ds) = isValid ds
   isValid (OpExp _ o) = isValid o
-  span (Id (s, _)) = s
+  span (Id s _ _ _) = s
   span (App s _ _) = s
   span (Fn s _ _) = s
   span (Asc s _ _) = s
   span (Arrow s _ _) = s
-  span (Op (s, _)) = s
-  span (Con (s, _)) = s
-  span (ConOp (s, _)) = s
   span (Wild s) = s
   span (Const s _) = s
   span (Ops e []) = span e
@@ -170,14 +170,11 @@ instance IsAST Exp where
   span (Assign s _ _) = s
   span (Block ds) = span ds
   span (OpExp s _) = s
-  fullParen e@(Id _) = e
+  fullParen e@(Id _ _ _ _) = e
   fullParen (App s e1 es) = par (App s (fp e1) (fmap fp es))
   fullParen (Fn s args body) = par (Fn s (fpe args) (fpe body))
   fullParen (Asc s e t) = par (Asc s (fp e) (fp t))
   fullParen (Arrow s a b) = par (Arrow s (fp a) (fp b))
-  fullParen e@(Op _) = e
-  fullParen e@(Con _) = e
-  fullParen e@(ConOp _) = e
   fullParen e@(Wild _) = e
   fullParen e@(Const _ _) = e
   fullParen (Ops e ops) =
@@ -195,16 +192,37 @@ instance IsAST Exp where
   fullParen (Assign s l e) = par (Assign s (fp l) (fp e))
   fullParen (Block ds) = Block (fp ds)
   fullParen (OpExp s e) = OpExp s (fpe e)
-  pp (Id (_, e)) = text e
+  noParen e@(Id _ _ _ _) = e
+  noParen (App s e1 es) = App s (noParen e1) (noParen es)
+  noParen (Fn s (Paren s' p) body) = Fn s (Paren s' (noParen p)) (noParen body)
+  noParen (Fn s (Asc s' (Paren s'' p) t) body) =
+    Fn s (Asc s' (Paren s'' (noParen p)) (noParen t)) (noParen body)
+  noParen (Fn s args body) = Fn s (noParen args) (noParen body)
+  noParen (Asc s e t) = Asc s (noParen e) (noParen t)
+  noParen (Arrow s a b) = Arrow s (noParen a) (noParen b)
+  noParen e@(Wild _) = e
+  noParen e@(Const _ _) = e
+  noParen (Ops e ops) =
+    Ops (noParen e) ((\(op, e2) -> (noParen op, noParen e2)) <$> ops)
+  noParen (Case s e ds) = Case s (noParen e) (noParen ds)
+  noParen (If s i t e) = If s (noParen i) (noParen t) (noParen e)
+  noParen (IfMatch s p i t e) = IfMatch s (noParen p) (noParen i) (noParen t) (noParen e)
+  noParen (Dot s es) = Dot s (map noParen es)
+  noParen (Paren s e) = noParen e
+  noParen (Tuple s es) = Tuple s (noParen <$> es)
+  noParen (List s es) = List s (noParen <$> es)
+  noParen (Do s p e ds) = Do s (noParen p) (noParen e) (noParen ds)
+  noParen (Assign s l e) = Assign s (noParen l) (noParen e)
+  noParen (Block ds) = Block (noParen ds)
+  noParen (OpExp s e) = OpExp s (noParen e)
+  pp (Id _ Ident _ e) = text e
+  pp (Id _ Op _ o) = parens (text o)
   pp (App _ o [a, b]) | null $ isOppy o = pp a <+> ppOppy o <+> pp b
   pp (App _ e1 e2) = pp e1 <+> sep (pp <$> e2)
   pp (Fn _ args body) =
     ppDef (PP.text "fn" <+> pp args) (PP.text "=") body
   pp (Asc _ e t) = ppOp e (PP.text ":") t
   pp (Arrow _ a b) = ppOp a (PP.text "->") b
-  pp (Op (_, o)) = parens (text o)
-  pp (Con (_, c)) = text c
-  pp (ConOp (_, o)) = parens (text o)
   pp (Wild _) = PP.text "_"
   pp (Const _ (EInt i)) = integer i
   pp (Const _ (EFloat d)) = double d
@@ -231,14 +249,12 @@ instance IsAST Exp where
   pp (OpExp _ e) = hcat [PP.text "`", pp e, PP.text "`"]
 
 isOppy :: Exp -> ValidErrs
-isOppy (Op _) = []
-isOppy (ConOp _) = []
+isOppy (Id _ Op _ _) = []
 isOppy (OpExp _ e) = isValid e
 isOppy e = [(span e, "Not a valid operator")]
 
 ppOppy :: Exp -> Doc
-ppOppy (Op (_, o)) = text o
-ppOppy (ConOp (_, o)) = text o
+ppOppy (Id _ Op _ o) = text o
 ppOppy e@(OpExp _ _) = pp e
 ppOppy (Paren _ e) = ppOppy e
 ppOppy e = pp (OpExp (span e) e)
@@ -250,10 +266,7 @@ isArgs e = isPat e
 isPat :: Exp -> ValidErrs
 isPat (App _ a es) = isPatL a <> concatMap isPat es
 isPat (Asc _ e t) = isPat e <> isTy t
-isPat (Id _) = []
-isPat (Con _) = []
-isPat (Op _) = []
-isPat (ConOp _) = []
+isPat (Id _ _ _ _) = []
 isPat (Wild _) = []
 isPat (Const _ _) = []
 isPat (Paren _ e) = isPat e
@@ -263,18 +276,17 @@ isPat (Block ds) = isRecPat ds
 isPat e = [(span e, "Not a valid pattern")]
 
 isPatL :: Exp -> ValidErrs
+isPatL (Id _ _ Con _) = []
 isPatL (App _ a es) = isPatL a <> concatMap isPat es
 isPatL (Asc _ e t) = isPatL e <> isTy t
 isPatL (Paren _ e) = isPatL e
-isPatL (Con _) = []
-isPatL (ConOp _) = []
 isPatL e = [(span e, "Not a valid pattern head")]
 
 isRecPat :: Defs -> ValidErrs
 isRecPat (_, ps) = concatMap isFieldBind ps
 
 isFieldBind :: (Span, Def) -> ValidErrs
-isFieldBind (_, Def (Id _) e) = isPat e
+isFieldBind (_, Def (Id _ _ Var _) e) = isPat e
 isFieldBind (s, _) = [(s, "Not a valid field pattern")]
 
 instance IsAST Def where
@@ -290,6 +302,11 @@ instance IsAST Def where
   fullParen (Data pat ds) = Data (fpe pat) (fp ds)
   fullParen (Struct pat ds) = Struct (fpe pat) (fp ds)
   fullParen d@(Fix _ _ _) = d
+  noParen (BindExp e) = BindExp (noParen e)
+  noParen (Def pat e) = Def (noParen pat) (noParen e)
+  noParen (Data pat ds) = Data (noParen pat) (noParen ds)
+  noParen (Struct pat ds) = Struct (noParen pat) (noParen ds)
+  noParen d@(Fix _ _ _) = d
   pp (BindExp e) = pp e
   pp (Def pat e) = ppDef (pp pat) (PP.text "=") e
   pp (Data pat ds) = ppDef (pp pat) (PP.text "= data") (Block ds)
@@ -301,10 +318,7 @@ instance IsAST Def where
 isLHS :: Exp -> ValidErrs
 isLHS (App _ a es) = isLHS a <> concatMap isPat es
 isLHS (Asc _ a t) = isLHS a <> isTy t
-isLHS (Id _) = []
-isLHS (Op _) = []
-isLHS (Con _) = []
-isLHS (ConOp _) = []
+isLHS (Id _ _ _ _) = []
 isLHS (Paren _ e) = isLHS e
 isLHS e = [(span e, "Not a valid LHS head")]
 
@@ -318,17 +332,15 @@ isLHS e = [(span e, "Not a valid LHS head")]
 -- isFunDef e = [(span e, "Not a valid function head")]
 
 isTyCon :: Exp -> ValidErrs
+isTyCon (Id _ _ Con _) = []
 isTyCon (App _ a e) = isTyCon a <> concatMap isTyArg e
 isTyCon (Asc _ e t) = isTyCon e <> isTy t
-isTyCon (Con _) = []
-isTyCon (ConOp _) = []
 isTyCon (Paren _ e) = isTyCon e
 isTyCon e = [(span e, "Not a valid Type Constructor")]
 
 isTyArg :: Exp -> ValidErrs
 isTyArg (Asc _ e t) = isTyArg e <> isTy t
-isTyArg (Id _) = []
-isTyArg (Op _) = []
+isTyArg (Id _ _ Var _) = []
 isTyArg (Paren _ e) = isTyArg e
 isTyArg e = [(span e, "Not a valid type argument")]
 
@@ -341,15 +353,13 @@ isConDef (_, BindExp e) = isConDefApp e
 isConDef (s, _) = [(s, "Not a valid constructor definition")]
 
 isCon :: Exp -> ValidErrs
+isCon (Id _ _ Con _) = []
 isCon (Paren _ e) = isCon e
-isCon (Con _) = []
-isCon (ConOp _) = []
 isCon e = [(span e, "Not a constructor name in ascribed constructor def")]
 
 isConDefApp :: Exp -> ValidErrs
+isConDefApp (Id _ _ Con _) = []
 isConDefApp (App _ a e) = isConDefApp a <> concatMap isTy e
-isConDefApp (Con _) = []
-isConDefApp (ConOp _) = []
 isConDefApp (Paren _ e) = isConDefApp e
 isConDefApp e = [(span e, "Not a valid constructor name in short constructor def")]
 
@@ -361,19 +371,15 @@ isFieldDef (_, BindExp (Asc _ c t)) = isFieldName c <> isTy t
 isFieldDef (s, _) = [(s, "Invalid field definition")]
 
 isFieldName :: Exp -> ValidErrs
-isFieldName (Id _) = []
-isFieldName (Op _) = []
+isFieldName (Id _ _ Var _) = []
 isFieldName (Paren _ e) = isFieldName e
 isFieldName e = [(span e, "Invalid field name")]
 
 isTy :: Exp -> ValidErrs
-isTy (Id _) = []
+isTy (Id _ _ _ _) = []
 isTy (App _ a b) = isTy a <> concatMap isTy b
 isTy (Asc _ t k) = isTy t <> isTy k
 isTy (Arrow _ a b) = isTy a <> isTy b
-isTy (Op _) = []
-isTy (Con _) = []
-isTy (ConOp _) = []
 isTy (Wild _) = []
 isTy (Paren _ t) = isTy t
 isTy (Tuple _ es) = concatMap isTy es

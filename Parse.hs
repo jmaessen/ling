@@ -12,6 +12,7 @@ import Data.Functor
 import Data.Maybe
 import Data.Void(Void)
 import Data.Map hiding (empty)
+import Data.Word(Word8)
 import Text.Megaparsec as P
 import Text.Megaparsec.Byte
 import Text.Megaparsec.Byte.Lexer as L
@@ -38,6 +39,22 @@ utf8span1 p = do
     (rs, _)
       | BS.null rs -> empty
       | otherwise -> rs <$ takeP Nothing (BS.length rs)
+
+quotedString :: MP m => m ByteString
+quotedString = do
+  let b :: Word8 = fromIntegral (ord '"')
+      s :: Word8 = fromIntegral (ord '\\')
+      converter bs =
+        case reads ('"':UTF8.toString bs ++"\"") of
+          [(s, "")] -> return (UTF8.fromString s)
+          _ -> empty
+      parser = do
+        bs <- takeWhileP Nothing (\c -> c /= b)
+        single b
+        case BS.unsnoc bs of
+          Just (_, ss) | s == ss -> (BS.snoc bs b <>) <$> parser
+          _ -> return bs
+  single b *> parser >>= converter
 
 charLiteral :: MP m => m ByteString
 charLiteral = do
@@ -92,15 +109,17 @@ isIdCont :: Char -> Bool
 isIdCont c = isAlphaNum c || c == '\'' || c == '_'
 
 isIdStart :: Char -> Bool
-isIdStart c = isIdCont c && not (isUpper c)
+isIdStart c = isIdCont c && not (isUpper c || isDigit c)
 
 ident :: MP m => Spacing -> m Id
 ident s = tok s $ label "id" $ do
   front <- utf8satisfy isIdStart
   rest <- utf8span isIdCont
+  let res = front <> rest
+  guard (res `notElem` ["fn", "if", "then", "else", "infix", "infixl", "infixr", "data", "struct", "case", "do"])
   pure (front <> rest)
 
-con :: MP m => Spacing -> m Con
+con :: MP m => Spacing -> m Id
 con s = tok s $ label "con" $ do
   front <- takeWhileP Nothing (\c -> c == fromIntegral (fromEnum '\'') || c == fromIntegral (fromEnum '_'))
   cap <- utf8satisfy isUpper
@@ -112,12 +131,12 @@ key kw s = fmap fst $ tok s $ label (UTF8.toString kw) $
   (string kw *> notFollowedBy (utf8satisfy isIdCont))
 
 isOpChar :: Char -> Bool
-isOpChar c = (isSymbol c || isPunctuation c) && (c `notElem` ("\",()[]{}`" :: String))
+isOpChar c = (isSymbol c || isPunctuation c) && (c `notElem` ("\'\",()[]{}`" :: String))
 
 isOpStart :: Char -> Bool
 isOpStart c = isOpChar c && c /= ':' && c /= '_'
 
-opr :: MP m => m Op
+opr :: MP m => m Id
 opr = tok NL $ label "op" $ do
   front <- utf8satisfy isOpStart
   rest <- utf8span isOpChar
@@ -125,7 +144,7 @@ opr = tok NL $ label "op" $ do
   guard (r /= "=" && r /= "->" && r /= ";")
   pure r
 
-conop :: MP m => m ConOp
+conop :: MP m => m Id
 conop = tok NL $ label ":conop" $ do
   front <- string ":"
   rest <- utf8span isOpChar
@@ -156,7 +175,7 @@ sign = (negate <$ string "-") <|> (id <$ string "+") <|> pure id
 
 int :: MP m => Spacing -> m (Span, Integer)
 int s = tok s $ label "<integer>" $
-  (sign <*> ((string "0" *> (octal <|> (string' "x" *> hexadecimal) <|> (string' "b" *> binary))) <|> decimal))
+  (sign <*> ((string "0" *> (octal <|> (string' "x" *> hexadecimal) <|> (string' "b" *> binary) <|> pure 0)) <|> decimal))
 
 double :: MP m => Spacing -> m (Span, Double)
 double s = tok s $ label "<double>" (sign <*> float)
@@ -173,24 +192,25 @@ expSimp s =
   ((\(sp, f) -> f sp) <$> parens s expParens) <|>
   label "[list]" (uncurry List <$> tok s (between (bare NL (string "[")) (string "]") (snd <$> tuple))) <|>
   (Block <$> block s) <|>
-  label "\"string\"" (constant EString <$>
-                      tok s (between (string "\"") (string "\"") (BS.concat <$> many charLiteral))) <|>
+  label "\"string\"" (constant EString <$> tok s quotedString) <|>
   label "'char'" (try (constant EChar <$>
                        tok s (between (string "'") (string "'") charLiteral))) <|>
   -- Keyword expressions must come before ids and ops.
   label "fn" ((\f a b -> Fn (f `uSpan` span b) a b) <$> key "fn" NL <*> exp NL <* keyOp "=" <*> exp s) <|>
+  label "if" ((\f i t e -> If (f `uSpan` span e) i t e) <$>
+              key "if" NL <*> exp NL <* key "then" NL <*> exp NL <* key "else" NL <*> exp s) <|>
   -- ids and ops go next.
   (Wild <$> key "_" s) <|>
-  (Id <$> ident s) <|>
-  (Con <$> con s) <|>
+  ((\(s, i) -> Id s Ident Var i) <$> ident s) <|>
+  ((\(s, i) -> Id s Ident Con i) <$> con s) <|>
   (constant EInt <$> int s) <|>
   (constant EFloat <$> double s)
 
 -- Parse some stuff inside parens
 expParens :: MP m => m (Span -> Exp)
 expParens =
-  ((\(_, o) s -> Op (s,o)) <$> opr) <|>
-  ((\(_, o) s -> ConOp (s,o)) <$> conop) <|>
+  ((\(_, o) s -> Id s Op Var o) <$> opr) <|>
+  ((\(_, o) s -> Id s Op Con o) <$> conop) <|>
   do t <- tuple
      pure $ case t of
        (False, [e]) -> flip Paren e
@@ -224,8 +244,8 @@ expOp s = do
 
 iop :: MP m => Spacing -> m Exp
 iop BT =
-  (Op <$> opr) <|>
-  (ConOp <$> conop)
+  ((\(s, o) -> Id s Op Var o) <$> opr) <|>
+  ((\(s, o) -> Id s Op Con o) <$> conop)
 iop _ =
   (uncurry OpExp <$> tok NL (between (bare NL (string "`")) (string "`") (exp BT))) <|> iop BT
 
@@ -304,14 +324,11 @@ unfixDef fs (Struct a ds) = Data (unfixExp fs a) (unfix fs ds)
 unfixDef _  f@(Fix _ _ _) = f -- Or strip?
 
 unfixExp :: Fixities -> Exp -> Exp
-unfixExp _ e@(Id _) = e
+unfixExp _ e@(Id _ _ _ _) = e
 unfixExp fs (App s a b) = App s (unfixExp fs a) (unfixExp fs <$> b)
 unfixExp fs (Fn s a b) = Fn s (unfixExp fs a) (unfixExp fs b)
 unfixExp fs (Asc s a b) = Asc s (unfixExp fs a) (unfixExp fs b)
 unfixExp fs (Arrow s a b) = Arrow s (unfixExp fs a) (unfixExp fs b)
-unfixExp _ e@(Op _) = e
-unfixExp _ e@(Con _) = e
-unfixExp _ e@(ConOp _) = e
 unfixExp _ e@(Wild _) = e
 unfixExp _ e@(Const _ _) = e
 unfixExp fs (Case s e ds) = Case s (unfixExp fs e) (unfix fs ds)
@@ -334,13 +351,12 @@ opApp :: Exp -> Exp -> Exp -> Exp
 opApp a op b = App (span a `uSpan` span b) op [a, b]
 
 unfixOps :: Fixities -> Exp -> [(Exp, Exp)] -> Exp
-unfixOps _ a [] = a
-unfixOps _ a [(op, b)] = opApp a op b
+unfixOps fs a [] = unfixExp fs a
+unfixOps fs a [(op, b)] = unfixExp fs (opApp a op b)
 unfixOps fs a oes = shunt [] a oes where
   -- left and right precedence for given op
   prec :: Exp -> (Int, Int)
-  prec (Op (_, o)) = oPrec o
-  prec (ConOp (_, o)) = oPrec o
+  prec (Id _ Op _ o) = oPrec o
   prec (Paren _ e) = prec e
   prec _ = (maxBound, maxBound)
 
@@ -358,7 +374,7 @@ unfixOps fs a oes = shunt [] a oes where
   -- We can thus encode them together in a single stack with a special case for
   -- top of stack.
   shunt :: [(Exp, Int, Exp)] -> Exp -> [(Exp, Exp)] -> Exp
-  shunt [] eTop [] = eTop
+  shunt [] eTop [] = unfixExp fs eTop
   shunt ((e, _, op):s) eTop [] = shunt s (opApp e op eTop) []
   shunt [] eTop ((op, e) : os) =
     shunt [(eTop, snd (prec op), op)] e os
