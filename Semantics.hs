@@ -42,6 +42,9 @@ data Value
   | VStruct (Map FieldName Value)
   deriving (Eq, Show)
 
+vClo :: Var -> Int -> [([Pat], Exp)] -> Env -> Value
+vClo f n ds env = VClo f n (CloFun $ appDisjs f ds) env
+
 toList :: Value -> Maybe [Value]
 toList (VCon "[]" 0 []) = Just []
 toList (VCon "::" 2 [a,as]) = (a:) <$> toList as
@@ -140,9 +143,6 @@ appSat :: HasCallStack => Value -> [Value] -> Value
 appSat (VClo _ _ (CloFun f) env) vs = f env vs
 appSat (VPAp v ds) vs = appSat v (ds <> vs)
 appSat v _ = error ("appSat: bad closure "++show (pp v))
-
-vClo :: Var -> Int -> [([Pat], Exp)] -> Env -> Value
-vClo f n ds env = VClo f n (CloFun $ appDisjs f ds) env
 
 appDisjs :: HasCallStack => Var -> [([Pat], Exp)] -> Env -> [Value] -> Value
 appDisjs f [] _ vs = error ("Match failure in appDisjs "++show f ++ " = " ++ show (pp vs))
