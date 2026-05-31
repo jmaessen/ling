@@ -29,4 +29,4 @@ main = do
     Go -> mapM_ (print . pp . evalTop) $ fs
     Pp -> mapM_ (print . pp) $ fs
     Show -> mapM_ print $ fs
-    FParen -> mapM_ (print . fullParen) $ fs
+    FParen -> mapM_ (print . pp . fullParen) $ fs

@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, ApplicativeDo #-}
+{-# LANGUAGE OverloadedStrings, ApplicativeDo, PatternSynonyms #-}
 module Semantics where
 import Data.ByteString(ByteString)
 import Data.ByteString.UTF8(toString, fromString)
@@ -17,6 +17,10 @@ traceS :: Show a => a -> b -> b
 traceS a b | trace_enabled = traceShow a b
 traceS _ e = e
 
+traceSt :: String -> b -> b
+traceSt s b | trace_enabled = trace s b
+traceSt _ e = e
+
 type ConName = ByteString
 type FieldName = ByteString
 type Var = ByteString
@@ -33,20 +37,34 @@ instance Eq CloFun where
 instance Show CloFun where
   show _ = "<clofun>"
 
+data Desc = Desc Var Int CloFun
+  deriving (Eq, Show)
+
 data Value
   = VConst Constant
-  | VClo Var Int CloFun Env
-  | VCon ConName Int [Value]
-  | VPAp Value [Value]
-  | VTuple [Value]
+  | VDesc Desc
+  | VPAp Desc Env [Value] -- Also closures
+  | VObj Desc [Value]
   | VStruct (Map FieldName Value)
   deriving (Eq, Show)
 
 vClo :: Var -> Int -> [([Pat], Exp)] -> Env -> Value
-vClo f n ds env = VClo f n (CloFun $ appDisjs f ds) env
+vClo f n ds env = VPAp (Desc f n (CloFun $ appDisjs f ds)) env []
+
+pattern VCon0 :: ConName -> Value
+pattern VCon0 c <- VDesc (Desc c 0 _) where
+  VCon0 c =
+    VDesc (Desc c 0 (CloFun (\_ _ -> error ("Applying nullary "++ toString c))))
+
+pattern VCon :: ConName -> Int -> [Value] -> Value
+pattern VCon c n vs <- VObj (Desc c n _) vs where
+  VCon c n vs =
+    VObj (Desc c n (CloFun (\_ _ -> error ("Applying alread-built "++toString c)))) vs
+
+{-# COMPLETE VConst, VDesc, VPAp, VCon, VStruct #-}
 
 toList :: Value -> Maybe [Value]
-toList (VCon "[]" 0 []) = Just []
+toList (VCon0 "[]") = Just []
 toList (VCon "::" 2 [a,as]) = (a:) <$> toList as
 toList _ = Nothing
 
@@ -56,13 +74,18 @@ instance IsAST Value where
   fullParen t = t
   noParen t = t
   pp (VConst c) = pp (Const noSpan c)
-  pp (VClo v n _ _) = PP.text "<closure" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
-  pp (VPAp v vs) = PP.parens (pp v <+> PP.sep (pp <$> vs))
-  pp (VCon c _ []) = PP.text (toString c)
-  pp c@(VCon "::" 2 [_, _])
-    | Just cs <- toList c = PP.brackets (PP.sep $ PP.punctuate (PP.text ",") (pp <$> cs))
+  pp (VCon0 c) = PP.text (toString c)
+  pp (VDesc (Desc v n _)) =
+    PP.text "<desc" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+  pp (VPAp (Desc v n _) _ []) =
+    PP.text "<closure" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+  pp (VPAp (Desc v _ _) _ vs) = PP.parens (PP.text (toString v) <+> PP.sep (pp <$> vs))
+  pp c@(VCon "::" 2 [_,_])
+    | Just cs <- toList c =
+      PP.brackets (PP.sep $ PP.punctuate (PP.text ",") (pp <$> cs))
+  pp (VCon "()" _ vs) =
+    PP.parens (PP.hsep $ PP.punctuate (PP.text ",") (pp <$> vs))
   pp (VCon c _ vs) = PP.parens (PP.text (toString c) <+> PP.sep (pp <$> vs))
-  pp (VTuple vs) = PP.parens (PP.hsep $ PP.punctuate (PP.text ",") (pp <$> vs))
   pp (VStruct vs) =
     PP.vcat [PP.lbrace, PP.text "", PP.nest 2 (PP.vcat $ fmap ppField (M.toList vs)), PP.rbrace]
     where ppField (f, v) = PP.text (toString f) <+> PP.text "=" <+> pp v
@@ -70,79 +93,87 @@ instance IsAST Value where
 
 -- Assumes length ps == length vs
 matches :: HasCallStack => Env -> [Pat] -> [Value] -> Maybe Env
+matches env [p] [v] = match env p v
+matches _ [] _ = error "Empty pats"
+matches _ _ [] = error "Empty vars"
 matches env ps vs =
-  (<>env) <$> foldr (\(p, v) -> (>>= (\env' -> match env' p v))) (Just mempty) (zip ps vs)
+  case matches' env ps vs of
+    Just env' -> traceSt (show (PP.hsep (pp <$> ps))++" match "++show (PP.hsep (pp <$> vs))) (Just env')
+    Nothing -> Nothing
+matches' :: HasCallStack => Env -> [Pat] -> [Value] -> Maybe Env
+matches' env ps vs =
+  (<>env) <$> foldr (\(p, v) -> (>>= (\env' -> match' env' p v))) (Just mempty) (zip ps vs)
 
 -- Match Pat with Value in Env and yield fresh Env or Nothing on failure
 match :: HasCallStack => Env -> Pat -> Value -> Maybe Env
-match env (Paren _ p) val = match env p val
-match env (Asc _ p _) val = match env p val
-match env (Wild _) _ = Just env
-match env (Id _ _ Var var) val =
+match env p val =
+  case match' env p val of
+    Just env' -> traceSt (show (pp p)++" matches "++show (pp val)) (Just env')
+    Nothing -> Nothing
+
+match' :: HasCallStack => Env -> Pat -> Value -> Maybe Env
+match' env (Paren _ p) val = match' env p val
+match' env (Asc _ p _) val = match' env p val
+match' env (Wild _) _ = Just env
+match' env (Id _ _ Var var) val =
   case M.lookup var env of
     Nothing -> Just $ M.insert var val env
     Just _ -> error ("Duplicate binding of "++toString var++" in pat")
-match env (Id _ _ Con con) (VCon con' _ []) | con == con' = Just env
-match _ (Id _ _ Con _) _ = Nothing
-match env (Const _ c) (VConst vc) | c == vc = Just env
-match _ (Const _ _) _ = Nothing
-match env (Tuple _ es) (VTuple vs)
+match' env (Id _ _ Con con) (VCon0 con')
+  | con == con' = Just env
+match' _ (Id _ _ Con _) _ = Nothing
+match' env (Const _ c) (VConst vc) | c == vc = Just env
+match' _ (Const _ _) _ = Nothing
+match' env (Tuple _ es) v@(VCon "()" n vs)
+  | n /= length vs = error ("Bad tuple arity "++show n++": "++show (pp v))
   | length es /= length vs = Nothing
-  | otherwise = matches env es vs
-match _ (Tuple _ _) _ = Nothing
-match env (List _ []) (VCon "[]" 0 []) = Just env
-match env (List s (e:es)) (VCon "::" 2 [v, vs]) = do
-  env' <- match env e v
-  match env' (List s es) vs
-match _ (List _ _) _ = Nothing
-match env (Block (_, ds)) (VStruct fs) =
+  | otherwise = matches' env es vs
+match' _ (Tuple _ _) _ = Nothing
+match' env (List _ []) (VCon0 "[]") = Just env
+match' env (List s (e:es)) (VCon "::" 2 [v, vs]) = do
+  env' <- match' env e v
+  match' env' (List s es) vs
+match' _ (List _ _) _ = Nothing
+match' env (Block (_, ds)) (VStruct fs) =
   foldr (matchField fs) (Just env) ds
-match _ (Block _) _ = Nothing
-match env (App s (Paren _ p) as) v = match env (App s p as) v
-match env (App s (Asc _ p _) as) v = match env (App s p as) v
-match env (App s (App _ p ps) as) v = match env (App s p (ps <> as)) v
-match env p@(App _ (Id _ _ Con con) as) (VCon cn n rs)
-  | len == n && len == length rs && con == cn = matches env as rs
+match' _ (Block _) _ = Nothing
+match' env (App s (Paren _ p) as) v = match' env (App s p as) v
+match' env (App s (Asc _ p _) as) v = match' env (App s p as) v
+match' env (App s (App _ p ps) as) v = match' env (App s p (ps <> as)) v
+match' env p@(App _ (Id _ _ Con con) as) v@(VCon cn n rs)
+  | len /= length rs = error ("Obj ctor arity "++show n++" mismatch "++show (pp v))
+  | len == n && con == cn = matches' env as rs
   | len /= n && con == cn = error ("Constructor pat expected arity "++show n ++ ": "++show (pp p))
   where len = length as
-match _ (App _ _ _) _ = Nothing
-match _ p v =
+match' _ (App _ _ _) _ = Nothing
+match' _ p v =
   error ("Unrecognized pattern or missed match:\n"++show (pp p)++"\n"++show (pp v))
 
 matchField :: HasCallStack => Map FieldName Value -> (Span, Def) -> Maybe Env -> Maybe Env
 matchField _ _ Nothing = Nothing
 matchField fs (_, BindExp p@(Id _ _ Var fn)) (Just env) =
-  match env p =<< M.lookup fn fs
+  match' env p =<< M.lookup fn fs
 matchField _ (_, BindExp e) _ = error ("Illegal struct binding exp "++show (pp e))
 matchField fs (_, Def (Id _ _ Var fn) p) (Just env) =
-  match env p =<< M.lookup fn fs
+  match' env p =<< M.lookup fn fs
 matchField _ (_, Def f _) _ = error ("Illegal struct binding lhs "++show (pp f))
 matchField _ (_, p) _ = error ("Illegal struct pattern "++show (pp p))
 
--- What's the arity of the function?
-arity :: HasCallStack => Value -> Int
-arity (VClo _ n _ _) = n
-arity (VPAp v as) = arity v - length as
-arity v = error ("No arity for "++show v)
-
 -- Apply value to args.
 apply :: HasCallStack => Value -> [Value] -> Value
-apply c vs = appWithArity (arity c) (length vs) c vs
+apply (VDesc d) vs = appWithArity d mempty (length vs) vs
+apply (VPAp d env as) bs = appWithArity d env (length vs) vs
+  where vs = as <> bs
+apply v _ = error ("apply: bad closure "++show (pp v))
 
 -- Apply function to args (arities given)
-appWithArity :: HasCallStack => Int -> Int -> Value -> [Value] -> Value
-appWithArity n nv c vs
-  | n > nv = VPAp c vs
-  | n == nv = appSat c vs
-  | otherwise = do
-      let (vs', vs'') = splitAt n vs
-      apply (appSat c vs') vs''
-
--- Apply function to exactly its arity of args.
-appSat :: HasCallStack => Value -> [Value] -> Value
-appSat (VClo _ _ (CloFun f) env) vs = f env vs
-appSat (VPAp v ds) vs = appSat v (ds <> vs)
-appSat v _ = error ("appSat: bad closure "++show (pp v))
+appWithArity :: HasCallStack => Desc -> Env -> Int -> [Value] -> Value
+appWithArity (Desc v 0 _) _ _ _ = error ("Applying 0-ary "++toString v)
+appWithArity d@(Desc _ n (CloFun f)) env nv vs
+  | n > nv = VPAp d env vs
+  | n == nv = f env vs
+  | otherwise = apply (f env vs') vs''
+  where (vs', vs'') = splitAt n vs
 
 appDisjs :: HasCallStack => Var -> [([Pat], Exp)] -> Env -> [Value] -> Value
 appDisjs f [] _ vs = error ("Match failure in appDisjs "++show f ++ " = " ++ show (pp vs))
@@ -176,15 +207,16 @@ eval env (Fn s (App s' (App _ p ps) ps') e) =
   eval env (Fn s (App s' p (ps ++ ps')) e)
 eval env (Fn _ (App _ p ps) e) = vClo "<anon>" (1 + length ps) [(p:ps, e)] env
 eval env (Fn _ p e) = vClo "<anon1>" 1 [([p], e)] env
-eval env (Tuple _ es) = VTuple $ fmap (eval env) es
-eval _ (List _ []) = VCon "[]" 0 []
+eval env (Tuple _ es) = VCon "()" (length es) $ fmap (eval env) es
+eval _ (List _ []) = VCon0 "[]"
 eval env (List s (e:es)) = VCon "::" 2 [eval env e, eval env (List s es)]
 eval env (Case _ e (_,es)) =
   appDisjs "<case>" (map toDisj es) env [eval env e]
 eval env (If _ c t e) =
   case eval env c of
-    VCon "True" 0 [] -> eval env t
-    _ -> eval env e
+    VCon0 "True" -> eval env t
+    VCon0 "False" -> eval env e
+    v -> error ("If non-boolean "++show (pp v))
 eval env (IfMatch _ p c t e) =
   case match mempty p (eval env c) of
     Just env' -> eval (env' <> env) t
@@ -193,7 +225,7 @@ eval env (Block b) = evThings env (groupDefs b)
 eval _ e = error ("eval: Unhandled expression\n  "++show (pp e)++"\n  "++show e)
 
 evThings :: HasCallStack => Env -> [BlockThing] -> Value
-evThings _ [] = VTuple []
+evThings _ [] = VStruct mempty
 evThings env [BTS m] = VStruct (eval env <$> m)
 evThings env (D (BindExp (Asc _ (Id _ _ _ _) _)) : ts@(_:_)) = evThings env ts
 evThings env [D (BindExp e)] = eval env e
@@ -221,13 +253,13 @@ addCon (_, d) = error ("addCon: not a constructor def "++show (pp d))
 
 addCon' :: HasCallStack => Exp -> Env -> Env
 addCon' (Paren _ e) env = addCon' e env
-addCon' (Id _ _ Con c) env = M.insert c (VCon c 0 []) env
+addCon' (Id _ _ Con c) env = M.insert c (VCon0 c) env
 addCon' (App s (Paren _ e) as) env = addCon' (App s e as) env
 addCon' (App s (App _ e as) as') env = addCon' (App s e (as <> as')) env
 addCon' (App _ (Id _ _ Con c) as) env = M.insert c (cCon c (length as)) env
 addCon' (Asc s (Paren _ e) t) env = addCon' (Asc s e t) env
 addCon' (Asc _ (Id _ _ Con c) t) env = M.insert c (cCon c (typeArity t)) env
-addCon' (List _ []) env = M.insert "[]" (VCon "[]" 0 []) env
+addCon' (List _ []) env = M.insert "[]" (VCon0 "[]") env
 addCon' e _ = error ("addCon': not a constructor def "++show (pp e))
 
 typeArity :: HasCallStack => Exp -> Int
@@ -237,8 +269,9 @@ typeArity (Arrow _ _ b) = 1 + typeArity b
 typeArity _ = 0
 
 cCon :: Var -> Int -> Value
-cCon v 0 = VCon v 0 []
-cCon v i = VClo v i (CloFun $ const (VCon v i)) mempty
+cCon v 0 = VCon0 v
+cCon v i = VDesc d
+  where d = Desc v i (CloFun (const (VObj d)))
 
 toDisj :: HasCallStack => (Span, Def) -> ([Pat], Exp)
 toDisj (_, Def p e) = ([p], e)
@@ -297,11 +330,11 @@ groupDef (_, Def (App _ (Id _ _ Var f) ps) e) ts =
 groupDef (_, d) ts = D d : ts
 
 mkPrim :: (Var, Int, [Value] -> Value) -> (Var, Value)
-mkPrim (v, n, f) = (v, VClo v n (CloFun $ const f) mempty)
+mkPrim (v, n, f) = (v, VDesc (Desc v n (CloFun $ const f)))
 
 vBool :: Bool -> Value
-vBool True = VCon "True" 0 []
-vBool False = VCon "False" 0 []
+vBool True = VCon0 "True"
+vBool False = VCon0 "False"
 
 i2 :: HasCallStack => (a -> Value) -> (Integer -> Integer -> a) -> [Value] -> Value
 i2 v op [VConst (EInt a), VConst (EInt b)] = v (a `op` b)
@@ -311,9 +344,10 @@ evalTop :: HasCallStack => Defs -> Value
 evalTop ds = eval env0 (Block ds)
 
 valToList :: HasCallStack => Value -> [Value]
-valToList (VCon "[]" 0 []) = []
-valToList (VCon "::" 2 [h, t]) = h : valToList t
-valToList v = error ("valToList: not a list "++show (pp v))
+valToList v =
+  case toList v of
+    Just vs -> vs
+    _ -> error ("valToList: not a list "++show (pp v))
 
 valToString :: HasCallStack => Value -> ByteString
 valToString (VConst (EString s)) = s
@@ -330,7 +364,7 @@ valToInt v = error ("valToInt: not an int "++show (pp v))
 getPrim :: HasCallStack => [Value] -> Value
 getPrim [n, v] =
   case M.lookup (valToString v) env0 of
-    Just r@(VClo _ n' _ _)
+    Just r@(VDesc (Desc _ n' _))
       | fromInteger (valToInt n) == n' -> r
       | otherwise ->
         error ("Arity mismatch on prim "++show (pp v)++" registered as "++show n'++" asked for "++show (pp n))
@@ -345,7 +379,7 @@ env0 = M.fromList $ fmap mkPrim [
   ("intEq", 2, i2 vBool (==)),
   ("intLE", 2, i2 vBool (<=)),
   ("strAppend", 2, \[VConst (EString a), VConst (EString b)] -> VConst (EString (a <> b))),
-  ("putStr", 1, \[v] -> trace (toString (valToString v)) (VTuple [])), -- total hack, but "safe"
+  ("putStr", 1, \[v] -> trace (toString (valToString v)) (VCon0 "()")), -- total hack, but "safe"
   ("strConcat", 1, strConcat),
   ("intToStr", 1, \[v] -> VConst $ EString $ fromString $ show $ valToInt v)
   ]
