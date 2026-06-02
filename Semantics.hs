@@ -2,7 +2,7 @@
 module Semantics where
 import Control.Monad
 import Control.Monad.Reader
-import Control.Monad.Writer.Lazy
+import Control.Monad.State
 import Data.BakerVec
 import Data.ByteString(ByteString)
 import Data.ByteString.UTF8(toString, fromString)
@@ -138,10 +138,11 @@ instance Monoid DisjM where
   mempty = DM mempty
 
 -- Match monad
-type M a = WriterT DisjM Maybe a
+type M a = StateT Env Maybe a
 
 matched :: Var -> Value -> M ()
-matched n v = tell (DM $ M.singleton n v)
+matched i v = modify (M.insertWith collide i v)
+  where collide _ _ = error ("Duplicate pattern bindings for key "++toString i)
 
 matchFail :: M a
 matchFail = lift Nothing
@@ -149,8 +150,8 @@ matchFail = lift Nothing
 -- Inject match into evaluation
 withMatchesOr :: M () -> E a -> E a -> E a
 withMatchesOr m t e =
-  case execWriterT m of
-    Just (DM env) -> local (env<>) t
+  case execStateT m mempty of
+    Just env -> local (env<>) t
     Nothing -> e
 
 -- Assumes length ps == length vs
@@ -158,9 +159,10 @@ matches :: HasCallStack => [Pat] -> [Value] -> M ()
 matches [p] [v] = match p v
 matches [] _ = error "Empty pats"
 matches _ [] = error "Empty vars"
-matches ps vs =
-  case execWriterT (matches' ps vs) of
-    Just env -> traceSt (show (PP.hsep (pp <$> ps))++" match "++show (PP.hsep (pp <$> vs))) (tell env)
+matches ps vs = do
+  env <- get
+  case execStateT (matches' ps vs) env of
+    Just env' -> traceSt (show (PP.hsep (pp <$> ps))++" match "++show (PP.hsep (pp <$> vs))) (put env')
     Nothing -> matchFail
 
 matches' :: HasCallStack => [Pat] -> [Value] -> M ()
@@ -168,9 +170,10 @@ matches' ps vs = zipWithM_ match' ps vs
 
 -- Match Pat with Value in Env and yield fresh Env or Nothing on failure
 match :: HasCallStack => Pat -> Value -> M ()
-match p val =
-  case execWriterT (match' p val) of
-    Just env -> traceSt (show (pp p)++" matches "++show (pp val)) (tell env)
+match p val = do
+  env <- get
+  case execStateT (match' p val) env of
+    Just env' -> traceSt (show (pp p)++" matches "++show (pp val)) (put env')
     Nothing -> matchFail
 
 match' :: HasCallStack => Pat -> Value -> M ()
