@@ -25,11 +25,26 @@ traceSt :: String -> b -> b
 traceSt s b | trace_enabled = trace s b
 traceSt _ e = e
 
+{-
+-- List model for Vec
+type Vec a = [a]
+push :: Vec a -> a -> Vec a
+push v a = v ++ [a]
+
+pushAndIndex :: Vec a -> a -> (Ofs, Vec a)
+pushAndIndex v a = (length v, push v a)
+
+(!) :: Vec a -> Ofs -> a
+(!) = (!!)
+-}
+
 type ConName = ByteString
 type FieldName = ByteString
 type Var = ByteString
 
-type Env = Map Var Value
+type Ofs = Int
+
+type Env = (Map Var Ofs, Vec Value)
 
 type Pat = Exp
 
@@ -99,6 +114,17 @@ instance IsAST Value where
 -- Evaluation (environment) monad
 type E a = Reader Env a
 
+bindEnvWith :: (Ofs -> Ofs -> Ofs) -> Var -> Value -> Env -> Env
+bindEnvWith c i v (env, vec) =
+  let (o, vec') = pushAndIndex vec v
+  in (M.insertWith c i o env, vec')
+
+lookupEnv :: HasCallStack => Var -> Env -> Value
+lookupEnv i (env, vec) =
+  case M.lookup i env of
+    Nothing -> error ("Unbound variable "++toString i)
+    Just o -> vec ! o
+
 getEnv :: E Env
 getEnv = ask
 
@@ -106,42 +132,28 @@ withEnv :: Env -> E a -> E a
 withEnv env = local (const env)
 
 findEnv :: HasCallStack => Var -> E Value
-findEnv i =
-  asks (M.lookup i) >>= \case
-    Nothing -> error ("Unbound variable "++toString i)
-    Just v -> pure v
+findEnv i = asks (lookupEnv i)
 
 -- Takes a computation that computes bindings and evaluates
 -- it in an env containing those bindings, then evaluates
 -- the rest in that environment.
 fixEnv :: (E [(Var, Value)]) -> E r -> E r
-fixEnv a r = do
-  env <- ask
-  let vs = runReader a env'
-      env' = M.fromList vs <> env
-  withEnv env' r
+fixEnv a = local $ \(env, vec) ->
+  let vs = runReader a (env', vec')
+      env' :: Map Var Ofs
+      env' = M.fromList (zipWith (\(i, _) n -> (i,n)) vs [length vec ..]) <> env
+      vec' :: Vec Value
+      vec' = foldl (\ve (_, v) -> push ve v) vec vs
+  in (env', vec')
 
 withBinding :: Var -> Value -> E r -> E r
-withBinding i v r = local (M.insert i v) r
-
--- Disjoint environment monoid
-newtype DisjM = DM Env
-  deriving (Eq, Show)
-
-instance Semigroup DisjM where
-  DM a <> DM b =
-    DM $ M.unionWithKey
-      (\k _ _ -> error ("Duplicate pattern bindings for key "++toString k))
-      a b
-
-instance Monoid DisjM where
-  mempty = DM mempty
+withBinding i v = local $ bindEnvWith const i v
 
 -- Match monad
 type M a = StateT Env Maybe a
 
 matched :: Var -> Value -> M ()
-matched i v = modify (M.insertWith collide i v)
+matched i v = modify $ bindEnvWith collide i v
   where collide _ _ = error ("Duplicate pattern bindings for key "++toString i)
 
 matchFail :: M a
@@ -149,9 +161,10 @@ matchFail = lift Nothing
 
 -- Inject match into evaluation
 withMatchesOr :: M () -> E a -> E a -> E a
-withMatchesOr m t e =
-  case execStateT m mempty of
-    Just env -> local (env<>) t
+withMatchesOr m t e = do
+  (env, vec) <- ask
+  case execStateT m (mempty, vec) of
+    Just (env', vec') -> local (const (env'<>env, vec')) t
     Nothing -> e
 
 -- Assumes length ps == length vs
@@ -390,7 +403,7 @@ vBool False = VCon0 "False"
 
 i2 :: HasCallStack => (a -> Value) -> (Integer -> Integer -> a) -> [Value] -> Value
 i2 v op [VConst (EInt a), VConst (EInt b)] = v (a `op` b)
-i2 _ _ vs = error ("Bad args "++show (pp vs))
+i2 _ _ vs = error ("Bad args "++show (PP.hsep (pp <$> vs)))
 
 evalTop :: HasCallStack => Defs -> Value
 evalTop ds = runReader (eval (Block ds)) env0
@@ -415,16 +428,16 @@ valToInt v = error ("valToInt: not an int "++show (pp v))
 
 getPrim :: HasCallStack => [Value] -> Value
 getPrim [n, v] =
-  case M.lookup (valToString v) env0 of
-    Just r@(VDesc (Desc _ n' _))
+  case lookupEnv (valToString v) env0 of
+    r@(VDesc (Desc _ n' _))
       | fromInteger (valToInt n) == n' -> r
       | otherwise ->
         error ("Arity mismatch on prim "++show (pp v)++" registered as "++show n'++" asked for "++show (pp n))
-    _ -> error ("Nonexistent prim "++show (pp v))
+    _ -> error ("Bad prim "++show (pp v))
 getPrim as = error ("Bad args to prim "++show (pp as))
 
 env0 :: Env
-env0 = M.fromList $ fmap mkPrim [
+env0 = foldl (\env p -> uncurry (bindEnvWith const) (mkPrim p) env) mempty [
   ("prim", 2, getPrim),
   ("intAdd", 2, i2 (VConst . EInt) (+)),
   ("intSub", 2, i2 (VConst . EInt) (-)),

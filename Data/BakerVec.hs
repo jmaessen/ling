@@ -11,7 +11,6 @@ module Data.BakerVec(
 import Prelude hiding (replicate)
 
 import Control.Concurrent.MVar
-import Control.Monad
 import Control.Monad.Primitive
 import Data.List.NonEmpty(NonEmpty(..))
 import Data.Primitive.Array
@@ -76,10 +75,12 @@ The MVar discipline of take & put is useful for keeping the code systematic.
 
 -}
 
--- Invariant: We need to record undo actions only for currently-active
--- portions of the array.  The inactive region can safely be written
--- (and then becomes active).  So Pop will record an undo action,
--- but push and append don't have to.
+-- Invariant: every version other than the unique live root is reachable
+-- by following undo (Write) entries.  Growing the array (push/append)
+-- must therefore record an undo entry as well: otherwise two versions
+-- branched from a common parent at the same index alias the same slot
+-- and clobber each other (the older child reads the younger child's
+-- value).  See growFocus.  Pop likewise records an undo entry.
 
 type Len = Int
 type Idx = Int
@@ -171,14 +172,6 @@ cloneAll :: Storage a -> IO (Storage a)
 cloneAll (Storage w _ arr) = do
   Storage w 0 <$> cloneMutableArray arr 0 w
 
--- Append the first lb elements of sb to sa starting at la.
--- Does no bounds checking!
-appendStorage :: HasCallStack => Len -> Storage a -> Len -> Storage a -> IO ()
-appendStorage la (Storage wa _ arra) lb (Storage wb _ arrb)
-  | lb > wb = badIndex lb wb "appendStorage read"
-  | lb + la > wa = badIndex (lb+la) wa "appendStorage write"
-  | otherwise = copyMutableArray arra la arrb 0 lb
-
 incMut :: MutCount -> Storage a -> Storage a
 incMut k' (Storage w k arr) = Storage w (k+k') arr
 
@@ -191,9 +184,6 @@ resetMut :: Storage a -> Storage a
 resetMut (Storage w _ arr) = Storage w 0 arr
 
 -- First, the IO versions of the operations.
-size :: Vec a -> Len
-size (Vec l _) = l
-
 empty :: Vec a
 empty = Vec 0 undefined
 
@@ -236,18 +226,57 @@ withReadFocus (Vec l m) body = do
   r <- body s
   const r <$> putMVar m (Here s)
 
--- Focus for extend.  Takes a desired length.  Returns vector.
-withExtendFocus :: Vec a -> Len -> (Storage a -> IO ()) -> IO (Vec a)
-withExtendFocus (Vec l0 m) l body
-  | l <= l0 = badIndex l0 l "withExtendFocus"
-  | otherwise =  do
-      c <- takeMVar m
-      s@(Storage w _ _) <- focusContents 1 l m c
-      s' <- case s of
-        _ | w < l -> expandStorage (l `max` w+w) s
-          | otherwise -> pure s
-      body s'
-      const (Vec l m) <$> putMVar m (Here s')
+-- Grow v to length l (l > length v), filling indices [length v .. l-1] via
+-- `body`.  Branch-safe: the result is a fresh version with its own MVar, and
+-- the parent winds back to it through a Write undo chain (one entry per new
+-- index), so two versions grown from a common parent never clobber each other.
+-- The point of taking a target length is that we focus and expand ONCE no
+-- matter how many elements are added, so an append is linear in the appended
+-- length rather than paying a focus + capacity check per element.  The parent
+-- has length l0 and never reads indices >= l0, so the (garbage) `old` values
+-- recorded for the displaced slots only have to survive a wind-back, never a
+-- real read.
+growFocus :: HasCallStack => Vec a -> Len -> (Storage a -> IO ()) -> IO (Vec a)
+growFocus (Vec l0 _) l _ | l <= l0 = badIndex l0 l "growFocus"
+growFocus (Vec 0 _) l body = do          -- empty parent: no array to share
+  let w = l + l
+  arr <- newArray w undefined
+  let s = Storage w 0 arr
+  body s
+  Vec l <$> newMVar (Here s)
+growFocus (Vec l0 m') l body = do
+  c  <- takeMVar m'
+  s0@(Storage w _ _) <- focusContents 1 l m' c
+  s  <- if w < l then expandStorage (l `max` (w+w)) s0 else pure s0
+  -- Build the parent's undo chain standalone: interior waypoint MVars are
+  -- filled here, but the head (destined for m') is only returned and the
+  -- terminal child m is left unwritten.  We publish m and m' only after body
+  -- completes, so no racing reader can block on a half-built chain, and body's
+  -- array writes are ordered before any reader can observe the new root.
+  (m, srcContents) <- buildChain s l0 l
+  body s                                         -- fill [l0 .. l-1]
+  putMVar m  (Here (incMut (l - l0) s))          -- child root, only after body
+  putMVar m' srcContents                         -- release parent, only after body
+  pure (Vec l m)
+
+-- Build a Write undo chain  head -> ... -> tgt, one entry per (index, old
+-- value), allocating and filling a fresh waypoint MVar for each interior link.
+-- Returns the head VecContents to be stored into the parent's MVar; the
+-- terminal tgt is deliberately NOT written here (the caller publishes it).
+buildChain :: Storage a -> Idx -> Len -> IO (VecVar a, VecContents a)
+buildChain s i l = do
+  n <- newEmptyMVar
+  old <- readStorage s i
+  m <- if i+1 >= l then pure n else buildChain' n s (i+1) l
+  pure (m, Write n i old)
+
+buildChain' :: VecVar a -> Storage a -> Idx -> Len -> IO (VecVar a)
+buildChain' n _ i l | i >= l = pure n
+buildChain' n s i l = do
+  m <- newEmptyMVar
+  old <- readStorage s i
+  putMVar n (Write m i old)
+  buildChain' m s (i+1) l
 
 focusContents :: HasCallStack => MutCount -> Len -> VecVar a -> VecContents a -> IO (Storage a)
 focusContents _  _ _ Invalid = invalidErr "focusContents"
@@ -340,30 +369,24 @@ popIO v@(Vec l _) =
 
 -- push a new element.
 pushIO :: Vec a -> a -> IO (Vec a)
-pushIO (Vec 0 _) a = do
-  arr <- newArray 2 undefined
-  writeArray arr 0 a
-  Vec 1 <$> newMVar (Here (Storage 2 0 arr))
-pushIO v@(Vec l _) a =
-  withExtendFocus v (l+1) $ \s ->
-    writeStorage s l a
+pushIO v@(Vec l _) a = growFocus v (l+1) (\s -> writeStorage s l a)
 
--- Append a series of vectors to the given vector
--- WARNING: vectors may not share a common origin!
+-- Append a series of vectors to the given vector.  Branch-safe, and correct
+-- even when a vector is appended to itself or to one that shares its storage
+-- or history: we snapshot every source's contents (read-only, one at a time)
+-- *before* mutating anything, then grow the base in a single shot.  Snapshot
+-- first avoids the self-aliasing copy and the deadlock of re-taking a shared
+-- MVar mid-append; the single growFocus focuses and expands just once.
 sconcatIO :: Vec a -> [Vec a] -> IO (Vec a)
 sconcatIO va [] = pure va
-sconcatIO va@(Vec la _) vs@(v:vt)
-  | la == 0 = sconcatIO v vt
-  | lvs == 0 = pure va
-  | otherwise =
-      withExtendFocus va lr $ \s -> do
-        let appendOne l (Vec 0 _) = pure l
-            appendOne l vb@(Vec lb _) =
-              withReadFocus vb $ \sb ->
-                const (l + lb) <$> appendStorage l s lb sb
-        void $ foldM appendOne la vs
-  where lvs = sum (fmap size vs)
-        lr = la + lvs
+sconcatIO va@(Vec l0 _) vs = do
+  addends <- concat <$> mapM toListIO vs
+  case addends of
+    [] -> pure va
+    _  -> growFocus va (l0 + length addends) (\s -> fill s l0 addends)
+  where
+    fill _ _ []     = pure ()
+    fill s i (x:xs) = writeStorage s i x >> fill s (i+1) xs
 
 -- Compute function of list form.
 withListIO :: ([a] -> b) -> Vec a -> IO b
