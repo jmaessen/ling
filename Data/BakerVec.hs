@@ -182,8 +182,10 @@ appendStorage la (Storage wa _ arra) lb (Storage wb _ arrb)
 incMut :: MutCount -> Storage a -> Storage a
 incMut k' (Storage w k arr) = Storage w (k+k') arr
 
+{-
 overMut :: MutCount -> Storage a -> Bool
 overMut k' (Storage w k _) = k + k' >= w
+-}
 
 resetMut :: Storage a -> Storage a
 resetMut (Storage w _ arr) = Storage w 0 arr
@@ -210,10 +212,12 @@ readVecIO v@(Vec l _) i
   | i < 0 || i >= l = badIndex i l "read"
   | otherwise = withReadFocus v (\s -> readStorage s i)
 
+{-
 swapVecIO :: Vec a -> Idx -> a -> IO (a, Vec a)
 swapVecIO v@(Vec l _) i a
   | i < 0 || i >= l = badIndex i l "swap"
   | otherwise = focusSwap v i a
+-}
 
 writeVecIO :: Vec a -> Idx -> a -> IO (Vec a)
 writeVecIO v@(Vec l _) i a

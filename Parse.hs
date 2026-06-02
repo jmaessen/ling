@@ -46,7 +46,7 @@ quotedString = do
       s :: Word8 = fromIntegral (ord '\\')
       converter bs =
         case reads ('"':UTF8.toString bs ++"\"") of
-          [(s, "")] -> return (UTF8.fromString s)
+          [(s', "")] -> return (UTF8.fromString s')
           _ -> empty
       parser = do
         bs <- takeWhileP Nothing (\c -> c /= b)
@@ -201,8 +201,8 @@ expSimp s =
               key "if" NL <*> exp NL <* key "then" NL <*> exp NL <* key "else" NL <*> exp s) <|>
   -- ids and ops go next.
   (Wild <$> key "_" s) <|>
-  ((\(s, i) -> Id s Ident Var i) <$> ident s) <|>
-  ((\(s, i) -> Id s Ident Con i) <$> con s) <|>
+  ((\(s', i) -> Id s' Ident Var i) <$> ident s) <|>
+  ((\(s', i) -> Id s' Ident Con i) <$> con s) <|>
   (constant EInt <$> int s) <|>
   (constant EFloat <$> double s)
 

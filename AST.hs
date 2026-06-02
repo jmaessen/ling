@@ -208,7 +208,7 @@ instance IsAST Exp where
   noParen (If s i t e) = If s (noParen i) (noParen t) (noParen e)
   noParen (IfMatch s p i t e) = IfMatch s (noParen p) (noParen i) (noParen t) (noParen e)
   noParen (Dot s es) = Dot s (map noParen es)
-  noParen (Paren s e) = noParen e
+  noParen (Paren _ e) = noParen e
   noParen (Tuple s es) = Tuple s (noParen <$> es)
   noParen (List s es) = List s (noParen <$> es)
   noParen (Do s p e ds) = Do s (noParen p) (noParen e) (noParen ds)
