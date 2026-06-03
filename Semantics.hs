@@ -44,7 +44,7 @@ type Var = ByteString
 
 type Ofs = Int
 
-type Env = (Map Var Ofs, Vec Value)
+type Env = (Map Var Ofs, Int, Vec Value)
 
 type Pat = Exp
 
@@ -115,12 +115,11 @@ instance IsAST Value where
 type E a = Reader Env a
 
 bindEnvWith :: (Ofs -> Ofs -> Ofs) -> Var -> Value -> Env -> Env
-bindEnvWith c i v (env, vec) =
-  let (o, vec') = pushAndIndex vec v
-  in (M.insertWith c i o env, vec')
+bindEnvWith c i v (env, k, vec) =
+  (M.insertWith c i k env, k + 1, push vec v)
 
 lookupEnv :: HasCallStack => Var -> Env -> Value
-lookupEnv i (env, vec) =
+lookupEnv i (env, _, vec) =
   case M.lookup i env of
     Nothing -> error ("Unbound variable "++toString i)
     Just o -> vec ! o
@@ -138,13 +137,12 @@ findEnv i = asks (lookupEnv i)
 -- it in an env containing those bindings, then evaluates
 -- the rest in that environment.
 fixEnv :: (E [(Var, Value)]) -> E r -> E r
-fixEnv a = local $ \(env, vec) ->
-  let vs = runReader a (env', vec')
-      env' :: Map Var Ofs
-      env' = M.fromList (zipWith (\(i, _) n -> (i,n)) vs [length vec ..]) <> env
-      vec' :: Vec Value
+fixEnv a = local $ \(env, k, vec) ->
+  let vs = runReader a (env', k', vec')
+      k' = k + length vs
+      env' = M.fromList (zipWith (\(i, _) n -> (i,n)) vs [k ..]) <> env
       vec' = foldl (\ve (_, v) -> push ve v) vec vs
-  in (env', vec')
+  in (env', k', vec')
 
 withBinding :: Var -> Value -> E r -> E r
 withBinding i v = local $ bindEnvWith const i v
@@ -162,9 +160,9 @@ matchFail = lift Nothing
 -- Inject match into evaluation
 withMatchesOr :: M () -> E a -> E a -> E a
 withMatchesOr m t e = do
-  (env, vec) <- ask
-  case execStateT m (mempty, vec) of
-    Just (env', vec') -> local (const (env'<>env, vec')) t
+  (env, k, vec) <- ask
+  case execStateT m (mempty, k, vec) of
+    Just (env', k', vec') -> local (const (env'<>env, k', vec')) t
     Nothing -> e
 
 -- Assumes length ps == length vs
@@ -235,7 +233,7 @@ matchField _ (_, p) = error ("Illegal struct pattern "++show (pp p))
 
 -- Apply value to args.
 apply :: HasCallStack => Value -> [Value] -> E Value
-apply (VDesc d) vs = appWithArity d mempty (length vs) vs
+apply (VDesc d) vs = appWithArity d (mempty, 0, mempty) (length vs) vs
 apply (VPAp d env as) bs = appWithArity d env (length vs) vs
   where vs = as <> bs
 apply v _ = error ("apply: bad closure "++show (pp v))
@@ -437,7 +435,7 @@ getPrim [n, v] =
 getPrim as = error ("Bad args to prim "++show (pp as))
 
 env0 :: Env
-env0 = foldl (\env p -> uncurry (bindEnvWith const) (mkPrim p) env) mempty [
+env0 = foldl (\env p -> uncurry (bindEnvWith const) (mkPrim p) env) (mempty, 0, mempty) [
   ("prim", 2, getPrim),
   ("intAdd", 2, i2 (VConst . EInt) (+)),
   ("intSub", 2, i2 (VConst . EInt) (-)),
