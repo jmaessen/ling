@@ -197,7 +197,7 @@ replicateIO l a = do
 badIndex :: HasCallStack => Idx -> Len -> String -> IO a
 badIndex i l op = error (op++": index "++shows i (" outside length "++show l))
 
-readVecIO :: Vec a -> Idx -> IO a
+readVecIO :: HasCallStack => Vec a -> Idx -> IO a
 readVecIO v@(Vec l _) i
   | i < 0 || i >= l = badIndex i l "read"
   | otherwise = withReadFocus v (\s -> readStorage s i)
@@ -400,7 +400,7 @@ withListIO f v@(Vec l _) = do
 replicate :: Len -> a -> Vec a
 replicate l a = unsafeDupablePerformIO (replicateIO l a)
 
-(!) :: Vec a -> Idx -> a
+(!) :: HasCallStack => Vec a -> Idx -> a
 v ! i = unsafeDupablePerformIO (readVecIO v i)
 
 -- Returns a new vec with the write performed.  The old vec is unchanged.
