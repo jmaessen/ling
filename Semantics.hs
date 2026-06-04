@@ -89,10 +89,10 @@ instance Semigroup Known where
 
 vClo :: HasCallStack => Var -> Int -> [([Pat], Exp)] -> EV
 vClo f n ds = do
-  cf <- appDisjs f ds (replicate n Unknown)
+  (_, cf) <- appDisjs f ds (replicate n Unknown)
   let d = Desc f n (CloFun cf)
   pure $ (KnownDesc d, do
-    vec <- ask
+    vec <- getVec
     pure (VPAp d vec []))
 
 pattern VCon0 :: ConName -> Value
@@ -135,20 +135,27 @@ instance IsAST Value where
     where ppField (f, v) = PP.text (toString f) <+> PP.text "=" <+> pp v
 
 instance IsAST Known where
-    isValid _ = []
-    span _ = noSpan
-    fullParen t = t
-    noParen t = t
-    pp Unknown = PP.text "Unknown"
-    pp (KnownValue v) = pp v
-    pp (KnownDesc (Desc v n _)) = PP.text "<k" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+  isValid _ = []
+  span _ = noSpan
+  fullParen t = t
+  noParen t = t
+  pp Unknown = PP.text "Unknown"
+  pp (KnownValue v) = pp v
+  pp (KnownDesc (Desc v n _)) = PP.text "<k" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
 
--- Evaluation (environment) monad
-type EI a = Reader Stack a
-type EO a = Reader Env a
-type E a = EO (EI a)
-type Ef b a = EO (b -> EI a)
-type EV = EO (Known, EI Value)
+-- Utilities not worth an import
+fromMaybe :: a -> Maybe a -> a
+fromMaybe d = maybe d id
+
+fromMaybeM :: Monad m => m a -> m (Maybe a) -> m a
+fromMaybeM d m = m >>= maybe d pure
+
+
+-- Evaluation (environment) monads
+type EI a = Reader Stack a -- Inner, actual evaluation.
+type EO a = Reader Env a   -- Outer, environment and analysis.
+type Ef b a = EO (Known, b -> EI a) -- Analysis parameterized by input
+type EV = EO (Known, EI Value) -- Analyze and yield a value.
 
 bindEnvWith :: ((Known, Ofs) -> (Known, Ofs) -> (Known, Ofs)) ->
                Var -> Known -> Env -> Env
@@ -157,15 +164,14 @@ bindEnvWith c i kn (env, k) =
 
 lookupEnv :: HasCallStack => Var -> Env -> (Known, Ofs)
 lookupEnv i (env, _) =
-  case M.lookup i env of
-    Nothing -> error ("Unbound variable "++toString i)
-    Just o -> o
+  fromMaybe (error ("Unbound variable "++toString i)) $
+    M.lookup i env
 
 getEnv :: EO Env
 getEnv = ask
 
-withEnv :: Env -> EO a -> EO a
-withEnv env = local (const env)
+getVec :: EI (Vec Value)
+getVec = ask
 
 findEnv :: HasCallStack => Var -> EV
 findEnv i = do
@@ -177,13 +183,13 @@ findEnv i = do
 -- the rest in that environment.
 fixEnv :: (EO [(Var, (Known, EI Value))]) -> EV -> EV
 fixEnv a inner = do
-  (env, k) <- ask
+  (env, k) <- getEnv
   let vs = runReader a (env', k')
       k' = k + length vs
       env' = M.fromList (zipWith (\(i, (kn, _)) n -> (i,(kn, n))) vs [k..]) <> env
   (kn, inner') <- local (const (env', k')) inner
   pure (kn, do
-    vec <- ask
+    vec <- getVec
     let vec' = foldl (\ve (_, (_, f)) -> push ve (runReader f vec')) vec vs
     local (const vec') inner')
 
@@ -195,9 +201,9 @@ conBinding i v r =
     pure (kn, local (`push` v) r')
 
 -- Match monad
-type MO a = State Env a
-type MI a = StateT Stack Maybe a
-type M v a = MO (v -> MI a)
+type MO a = State Env a -- Outer: compute match environment, handle dups
+type MI a = StateT Stack Maybe a -- Inner: decide match and bind variables
+type M v a = MO (v -> MI a) -- Analyze, produce matcher for v yielding a.
 
 matched :: Var -> Known -> M Value ()
 matched i kn = do
@@ -209,18 +215,17 @@ matchFail :: MI a
 matchFail = lift Nothing
 
 -- Inject match into evaluation
-withMatchesOr :: M b ()  -> EV -> Ef b Value -> Ef b Value
-withMatchesOr m t e = do
-  (env, k) <- ask
-  e' <- e
+withMatch :: HasCallStack => M b () -> EV -> Ef b (Maybe Value)
+withMatch m t = do
+  (env, k) <- getEnv
   let (f, (env', k')) = runState m (mempty, k)
   local (const (env' <> env, k')) $ do
-    (_, t') <- t
-    pure $ \v -> do
-      vec <- ask
+    (kn, t') <- t
+    pure (kn, \v -> do
+      vec <- getVec
       case execStateT (f v) vec of
-        Just vec' -> local (const vec') t'
-        Nothing -> e' v
+        Just vec' -> Just <$> local (const vec') t'
+        Nothing -> pure Nothing)
 
 -- Assumes length ps == length vs
 matches :: HasCallStack => [Pat] -> [Known] -> M [Value] ()
@@ -382,9 +387,14 @@ appWithDesc d@(Desc _ n (CloFun f)) vec nv vs
       applyInner f' vs''
 
 appDisjs :: HasCallStack => Var -> [([Pat], Exp)] -> [Known] -> Ef [Value] Value
-appDisjs f [] _ = pure $ \vs -> error ("Match failure in appDisjs "++show f ++ " = " ++ showPp vs)
-appDisjs f ((ps, e):ds) kn =
-  withMatchesOr (matches ps kn) (eval e) (appDisjs f ds kn)
+appDisjs f ds knp = do
+  pes <- mapM (\(ps, e) -> withMatch (matches ps knp) (eval e)) ds
+  let kn = foldr1 (<>) (map fst pes)
+      ms = map snd pes
+  pure (kn, \vs -> do
+          let oneMatch [] = error ("Match failure in "++show f ++ " " ++ showPp vs)
+              oneMatch (m:mr) = fromMaybeM (oneMatch mr) (m vs)
+          oneMatch ms)
 
 eval :: HasCallStack => Exp -> EV
 eval (Paren _ e) = eval e
@@ -417,11 +427,11 @@ eval (List _ []) = do
   pure (KnownValue v, pure v)
 eval (List s (e:es)) = eval (App s (Id s Op Con "::") [e, List s es])
 eval (Case _ e (_,es)) = do
-  (kn, e') <- eval e
-  ms <- appDisjs "<case>" (map toDisj es) [kn]
-  pure (Unknown, do
+  (ekn, e') <- eval e
+  (kn, m) <- appDisjs "<case>" (map toDisj es) [ekn]
+  pure (kn, do
     v <- e'
-    ms [v])
+    m [v])
 eval (If _ c t e) = do
   (ckn, c') <- eval c
   case ckn of
@@ -438,11 +448,11 @@ eval (If _ c t e) = do
     _ -> error ("If statically non-boolean "++showPp ckn)
 eval (IfMatch _ p c t e) = do
   (ckn, c') <- eval c
-  (_, e') <- eval e
-  m <- withMatchesOr (match p ckn) (eval t) (pure $ \_ -> e')
-  pure (Unknown, do
+  (tkn, tm) <- withMatch (match p ckn) (eval t)
+  (ekn, e') <- eval e
+  pure (tkn <> ekn, do
     v <- c'
-    m v)
+    fromMaybeM e' (tm v))
 eval (Block b) = evThings (groupDefs b)
 eval e = error ("eval: Unhandled expression\n  "++showPp e++"\n  "++show e)
 
@@ -462,13 +472,11 @@ evThings (D (BindExp e) : ts) = do
   (kn, r) <- evThings ts
   pure (kn, e' *> r)
 evThings (D (Def p e) : ts) = do
-  (kn, e') <- eval e
-  m <- withMatchesOr (match p kn)
-    (evThings ts)
-    (pure $ \v -> error ("Match failure "++showPp p++" = "++showPp v))
-  pure (Unknown, do
+  (ekn, e') <- eval e
+  (kn, m) <- withMatch (match p ekn) (evThings ts)
+  pure (kn, do
     v <- e'
-    m v)
+    fromMaybeM (error ("Match failure "++showPp p++" = "++showPp v)) (m v))
 evThings (D (Fix _ _ _) : ts) = evThings ts
 evThings (D (Data _ (_,ds)) : ts) = foldr addCon (evThings ts) ds
 evThings (D (Struct _ _) : ts) = evThings ts
@@ -620,8 +628,17 @@ env0 = foldl (\env p -> uncurry M.insert (mkPrim p) env) mempty [
   ("intSub", 2, i2 (VConst . EInt) (-)),
   ("intEq", 2, i2 vBool (==)),
   ("intLE", 2, i2 vBool (<=)),
-  ("strAppend", 2, \[VConst (EString a), VConst (EString b)] -> VConst (EString (a <> b))),
-  ("putStr", 1, \[v] -> trace (toString (valToString v)) (VCon0 "()")), -- total hack, but "safe"
+  ("strAppend", 2, \case
+      [VConst (EString a), VConst (EString b)] -> VConst (EString (a <> b))
+      vs -> error ("strAppend "++showsPp vs)
+  ),
+  ("putStr", 1, \case
+      [v] -> trace (toString (valToString v)) (VCon0 "()") -- total hack, but "safe"
+      vs -> error ("putStr "++showsPp vs)
+  ),
   ("strConcat", 1, strConcat),
-  ("intToStr", 1, \[v] -> VConst $ EString $ fromString $ show $ valToInt v)
+  ("intToStr", 1, \case
+      [v] -> VConst $ EString $ fromString $ show $ valToInt v
+      vs -> error ("intToStr "++showsPp vs)
+  )
   ]

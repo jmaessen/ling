@@ -22,6 +22,7 @@ String : Type
 
 strConcat : [String] -> String = prim 1 "strConcat"
 putStr : String -> () = prim 1 "putStr"
+intToStr : int -> String = prim 1 "intToStr"
 
 True || _ = True
 _ || b = b

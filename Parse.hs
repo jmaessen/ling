@@ -294,11 +294,11 @@ partialFile f = do
     (st, Right ds) -> pure (unfixExp mempty $ Block ds, stateInput st)
     (_, Left err) -> fail $ errorBundlePretty err
 
-file :: [Char] -> IO (SourcePos, Exp)
+file :: [Char] -> IO (SourcePos, Defs)
 file f = do
   c <- BS.readFile f
   case runParser toplevel f c of
-    Right (p, ds) -> pure (p, unfixExp mempty $ Block ds)
+    Right (p, ds) -> pure (p, unfix mempty ds)
     Left err -> fail $ errorBundlePretty err
 
 -- unfix functions resolve operator fixity.
