@@ -98,6 +98,7 @@ fpe = unpar . fp
 class IsAST t where
   isValid :: t -> ValidErrs
   span :: t -> Span
+  allSpans :: t -> [Span]
   fullParen :: t -> t
   noParen :: t -> t
   pp :: t -> Doc
@@ -106,6 +107,7 @@ class IsAST t where
 instance IsAST t => IsAST (Span, t) where
   isValid (_, t) = isValid t
   span (s, _) = s
+  allSpans (s, t) = s : allSpans t
   fullParen (s, t) = (s, fullParen t)
   noParen (s, t) = (s, noParen t)
   pp (_, t) = pp t
@@ -115,6 +117,7 @@ instance IsAST t => IsAST [t] where
   span [] = error "span []"
   span [a] = span a
   span (a:as) = span a `uSpan` span as
+  allSpans = concatMap allSpans
   fullParen ts = fullParen <$> ts
   noParen ts = noParen <$> ts
   pp = vcat . fmap pp
@@ -128,6 +131,9 @@ text = PP.text . UTF8.toString
 ppDef :: Doc -> Doc -> Exp -> Doc
 ppDef lhs eq (Block (_, ds)) = (lhs <+> eq <+> lbrace) $$ vcat [nest 2 (pp ds), rbrace]
 ppDef lhs eq e = hang (lhs <+> eq) 2 (pp e)
+
+allSpans2 :: (IsAST a, IsAST b) => a -> b -> [Span]
+allSpans2 a b = allSpans a <> allSpans b
 
 instance IsAST Exp where
   isValid (Id _ _ _ _) = []
@@ -170,6 +176,26 @@ instance IsAST Exp where
   span (Assign s _ _) = s
   span (Block ds) = span ds
   span (OpExp s _) = s
+  allSpans (Id s _ _ _) = [s]
+  allSpans (App s e es) = s : allSpans (e:es)
+  allSpans (Fn s p e) = s : allSpans2 p e
+  allSpans (Asc s t e) = s : allSpans2 t e
+  allSpans (Arrow s a b) = s : allSpans2 a b
+  allSpans (Wild s) = [s]
+  allSpans (Const s _) = [s]
+  allSpans (Ops e []) = allSpans e
+  allSpans (Ops e os) = allSpans e <> concatMap (\(a,b) -> allSpans a <> allSpans b) os
+  allSpans (Case s e bs) = s : allSpans2 e bs
+  allSpans (If s c t e) = s : allSpans [c, t, e]
+  allSpans (IfMatch s p c t e) = s : allSpans [p, c, t, e]
+  allSpans (Dot s es) = s : allSpans es
+  allSpans (Paren s e) = s : allSpans e
+  allSpans (Tuple s es) = s : allSpans es
+  allSpans (List s es) = s : allSpans es
+  allSpans (Do s p e bs) = s : allSpans2 p e <> allSpans bs
+  allSpans (Assign s p e) = s : allSpans2 p e
+  allSpans (Block ds) = allSpans ds
+  allSpans (OpExp s e) = s : allSpans e
   fullParen e@(Id _ _ _ _) = e
   fullParen (App s e1 es) = par (App s (fp e1) (fmap fp es))
   fullParen (Fn s args body) = par (Fn s (fpe args) (fpe body))
@@ -297,6 +323,11 @@ instance IsAST Def where
   -- isValid (Fun e ds) = isFunDef e <> isValid ds
   isValid (Fix _ _ _) = []
   span = error "span Def bereft of its span"
+  allSpans (BindExp e) = allSpans e
+  allSpans (Def p e) = allSpans2 p e
+  allSpans (Data p ds) = allSpans2 p ds
+  allSpans (Struct p ds) = allSpans2 p ds
+  allSpans (Fix _ _ _) = []
   fullParen (BindExp e) = BindExp (fpe e)
   fullParen (Def pat e) = Def (fpe pat) (fpe e)
   fullParen (Data pat ds) = Data (fpe pat) (fp ds)

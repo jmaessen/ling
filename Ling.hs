@@ -24,9 +24,9 @@ main :: HasCallStack => IO ()
 main = do
   as <- getArgs
   let (what, files) = args as
-  (fs :: [Defs]) <- fmap snd <$> mapM file files
+  (fs :: [(SpanPos, Defs)]) <- mapM file files
   case what of
     Go -> mapM_ (print . pp . evalTop) $ fs
-    Pp -> mapM_ (print . pp) $ fs
-    Show -> mapM_ print $ fs
-    FParen -> mapM_ (print . pp . fullParen) $ fs
+    Pp -> mapM_ (print . pp . snd) $ fs
+    Show -> mapM_ (print . snd) $ fs
+    FParen -> mapM_ (print . pp . fullParen . snd) $ fs

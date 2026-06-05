@@ -1,7 +1,7 @@
 {-# LANGUAGE ApplicativeDo, OverloadedStrings #-}
 module Parse(file, partialFile, toplevel,
              def, defs, block, exp,
-             unfix, unfixExp) where
+             unfix, unfixExp, ppWithSpan, SpanPos) where
 import AST
 import Control.Monad
 import Data.ByteString(ByteString)
@@ -9,6 +9,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.UTF8 as UTF8
 import Data.Char
 import Data.Functor
+import Data.List(sort)
 import Data.Maybe
 import Data.Void(Void)
 import Data.Map hiding (empty)
@@ -17,6 +18,7 @@ import Text.Megaparsec as P
 import Text.Megaparsec.Byte
 import Text.Megaparsec.Byte.Lexer as L
 import Text.Megaparsec.State as PS
+import qualified Text.PrettyPrint as PP
 import Prelude hiding (exp, span, lookup)
 
 type Error = Void
@@ -24,6 +26,16 @@ type Error = Void
 type MP m = MonadParsec Error ByteString m
 
 data Spacing = NoNL | NL | BT deriving (Eq, Ord, Show)
+
+type SpanPos = Span -> (SourcePos, SourcePos)
+
+spanPos :: PosState ByteString -> Defs -> SpanPos
+spanPos ps ds =
+  let spans = allSpans ds
+      offsets = sort (0 : [ a | S a _ <- spans ] ++ [ b | S _ b <- spans ])
+      posns = fromAscList . fst $ attachSourcePos id offsets ps
+      translate (S a b) = (posns ! a, posns ! b)
+  in translate
 
 utf8satisfy :: MP m => (Char -> Bool) -> m ByteString
 utf8satisfy p = do
@@ -284,8 +296,8 @@ defEq e =
   label "data" (Data e <$ key "data" NL <*> block NoNL) <|>
   label "binding" (Def e <$> exp NoNL)
 
-toplevel :: MP m => m (SourcePos, Defs)
-toplevel = (,) <$> getSourcePos <* optional anySpace <*> defs <* eof
+toplevel :: MP m => m Defs
+toplevel = optional anySpace *> defs <* eof
 
 partialFile :: [Char] -> IO (Exp, ByteString)
 partialFile f = do
@@ -294,12 +306,19 @@ partialFile f = do
     (st, Right ds) -> pure (unfixExp mempty $ Block ds, stateInput st)
     (_, Left err) -> fail $ errorBundlePretty err
 
-file :: [Char] -> IO (SourcePos, Defs)
+file :: [Char] -> IO (SpanPos, Defs)
 file f = do
   c <- BS.readFile f
-  case runParser toplevel f c of
-    Right (p, ds) -> pure (p, unfix mempty ds)
-    Left err -> fail $ errorBundlePretty err
+  let s = initialState f c
+      ps = statePosState s
+  case runParser' toplevel (initialState f c) of
+    (_, Right ds) -> pure (spanPos ps ds, unfix mempty ds)
+    (_, Left err) -> fail $ errorBundlePretty err
+
+ppWithSpan :: IsAST a => SpanPos -> a -> PP.Doc
+ppWithSpan sp a =
+  case sp (span a) of
+    (start, end) -> PP.sep [PP.text (show start) <> "-" <> PP.text (show end) <> ":", pp a]
 
 -- unfix functions resolve operator fixity.
 type Fixities = Map ByteString (FixDir, Int)
