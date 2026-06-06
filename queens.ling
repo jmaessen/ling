@@ -32,8 +32,10 @@ _ && b = b
 
 [a] : Type = data { (::) a [a]; []}
 
+one = 0 + 1
+
 fromTo : Int -> Int -> [Int]
-fromTo l u = if l <= u then l :: fromTo (l + 1) u else []
+fromTo l u = if l <= u then l :: fromTo (l + one) u else []
 
 (<>) : 'a -> 'a -> 'a
 [] <> b = b
@@ -42,7 +44,7 @@ a <> [] = a
 
 map : ('a -> 'b) -> ['a] -> ['b]
 map f [] = []
-map f (x::xs) = f x :: map f xs
+map f (m::ms) = f m :: map f ms
 
 concatMap : ('a -> ['b]) -> ['a] -> ['b]
 concatMap f [] = []

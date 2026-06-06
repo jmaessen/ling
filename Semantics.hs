@@ -3,7 +3,7 @@ module Semantics where
 import Control.Monad
 import Control.Monad.Reader
 import Control.Monad.State
-import Data.BakerVec hiding (replicate)
+import qualified Data.BakerVec as V
 import Data.ByteString(ByteString)
 import Data.ByteString.UTF8(toString, fromString)
 import AST
@@ -29,27 +29,37 @@ showPp = show . pp
 showsPp :: (IsAST a) => [a] -> String
 showsPp as = show (PP.fsep (pp <$> as))
 
-{-
 -- List model for Vec
-type Vec a = [a]
-push :: Vec a -> a -> Vec a
-push v a = v ++ [a]
+type BV a = [a]
+vpush :: BV a -> a -> BV a
+vpush v a = v ++ [a]
 
-pushAndIndex :: Vec a -> a -> (Ofs, Vec a)
-pushAndIndex v a = (length v, push v a)
-
-(!) :: Vec a -> Ofs -> a
+(!) :: HasCallStack => BV a -> Int -> a
 (!) = (!!)
+
+{-
+-- BakerVec model for Vec
+type BV a = V.Vec a
+
+vpush :: Vec a -> a -> Vec a
+vpush = V.push
+
+(!) :: BV a -> Ofs -> a
+(!) = (V.!)
 -}
 
 type ConName = ByteString
 type FieldName = ByteString
 type Var = ByteString
 
-type Ofs = Int
+type Ofs = (GL, Int)
+
+data GL = Global | Local
+  deriving (Eq, Show)
 
 type Env = (Map Var (Known, Ofs), Int)
-type Stack = Vec Value
+type Stack = BV Value
+type Globals = BV Value
 
 type Pat = Exp
 
@@ -91,10 +101,10 @@ instance Semigroup Known where
 
 vClo :: HasCallStack => Span -> Var -> Int -> [([Pat], Exp)] -> EV
 vClo s f n ds = do
-  (_, cf) <- appDisjs s f ds (replicate n Unknown)
+  (_, cf) <- locally $ appDisjs s f ds (replicate n Unknown)
   let d = Desc f n (CloFun cf)
   pure $ (KnownDesc d, do
-    vec <- getVec
+    (_, vec) <- getVecs
     pure (VPAp d vec []))
 
 pattern VCon0 :: ConName -> Value
@@ -154,66 +164,79 @@ fromMaybe d = maybe d id
 fromMaybeM :: Monad m => m a -> m (Maybe a) -> m a
 fromMaybeM d m = m >>= maybe d pure
 
-spanError :: Span -> String -> SpanPos -> a
+spanError :: HasCallStack => Span -> String -> SpanPos -> a
 spanError s msg sp = error (spanPrefix s sp ++ msg)
 
 -- Evaluation (environment) monads
-type EI a = Reader Stack a -- Inner, actual evaluation.
-type EO a = Reader (SpanPos, Env) a   -- Outer, environment and analysis.
+type EI a = Reader (Globals, Stack) a -- Inner, actual evaluation.
+type EO a = Reader (SpanPos, GL, Env) a   -- Outer, environment and analysis.
 type Ef b a = EO (Known, b -> EI a) -- Analysis parameterized by input
 type EV = EO (Known, EI Value) -- Analyze and yield a value.
 
 bindEnvWith :: ((Known, Ofs) -> (Known, Ofs) -> (Known, Ofs)) ->
-               Var -> Known -> Env -> Env
-bindEnvWith c i kn (env, k) =
-  (M.insertWith c i (kn, k) env, k + 1)
+               Var -> Known -> (SpanPos, GL, Env) -> (SpanPos, GL, Env)
+bindEnvWith c i kn (sp, gl, (env, k)) =
+  (sp, gl, (M.insertWith c i (kn, (gl, k)) env, k + 1))
 
-lookupEnv :: HasCallStack => Span -> Var -> (SpanPos, Env) -> (Known, Ofs)
-lookupEnv s i (sp, (env, _)) =
+lookupEnv :: HasCallStack => Span -> Var -> (SpanPos, GL, Env) -> (Known, Ofs)
+lookupEnv s i (sp, _, (env, _)) =
   fromMaybe (spanError s ("Unbound variable "++toString i) sp) $
     M.lookup i env
 
+push :: GL -> Value -> (Globals, Stack) -> (Globals, Stack)
+push Global v (g, s) = (vpush g v, s)
+push Local v (g, s) = (g, vpush s v)
+
 withEnv :: Env -> EO a -> EO a
-withEnv env = local (\(sp, _) -> (sp, env))
+withEnv env = local (\(sp, gl, _) -> (sp, gl, env))
+
+locally :: EO a -> EO a
+locally = local modGL where
+  modGL s@(_, Local, _) = s
+  modGL (sp, Global, (env, k)) = (sp, Local, (env, 0))
 
 getEnv :: EO Env
-getEnv = asks (snd @SpanPos) -- Whyyyyy??
+getEnv = asks (\(_, _, env) -> env)
 
 expSP :: EO SpanPos
-expSP = asks fst
+expSP = asks (\(sp, _, _) -> sp)
 
-expError :: Span -> String -> EO a
+expError :: HasCallStack => Span -> String -> EO a
 expError s msg = spanError s msg <$> expSP
 
-getVec :: EI (Vec Value)
-getVec = ask
+getVecs :: EI (Globals, Stack)
+getVecs = ask
 
 findEnv :: HasCallStack => Span -> Var -> EV
 findEnv s i = do
-  (kn, o) <- asks (lookupEnv s i)
-  pure (kn, asks (! o))
+  (kn, (gl, o)) <- asks (lookupEnv s i)
+  pure (kn,
+    case gl of
+      Global -> asks ((! o) . fst)
+      Local -> asks ((! o) . snd))
 
 -- Takes a computation that computes bindings and evaluates
 -- it in an env containing those bindings, then evaluates
 -- the rest in that environment.
 fixEnv :: (EO [(Var, (Known, EI Value))]) -> EV -> EV
 fixEnv a inner = do
-  (sp, (env, k)) <- ask
-  let vs = runReader a (sp, (env', k'))
+  (sp, gl, (env, k)) <- ask
+  let vs = runReader a (sp, gl, (env', k'))
       k' = k + length vs
-      env' = M.fromList (zipWith (\(i, (kn, _)) n -> (i,(kn, n))) vs [k..]) <> env
+      env' = M.fromList (zipWith (\(i, (kn, _)) n -> (i,(kn, (gl, n)))) vs [k..]) <> env
   (kn, inner') <- withEnv (env', k') inner
   pure (kn, do
-    vec <- getVec
-    let vec' = foldl (\ve (_, (_, f)) -> push ve (runReader f vec')) vec vs
+    vec <- getVecs
+    let vec' = foldl (\ve (_, (_, f)) -> push gl (runReader f vec') ve) vec vs
     local (const vec') inner')
 
 -- Handles a *constant* binding (constructor def)
 conBinding :: Var -> Value -> EV -> EV
-conBinding i v r =
-  local (fmap (bindEnvWith const i (KnownValue v))) $ do
+conBinding i v r = do
+  (_, gl, _) <- ask
+  local (bindEnvWith const i (KnownValue v)) $ do
     (kn, r') <- r
-    pure (kn, local (`push` v) r')
+    pure (kn, local (push gl v) r')
 
 -- Match monad
 data Mode = AlwaysSucceeds | MayFail | AlwaysFails deriving (Eq, Show)
@@ -233,16 +256,17 @@ meet AlwaysSucceeds o = o
 meet MayFail AlwaysFails = AlwaysFails
 meet MayFail _ = MayFail
 
-type MO a = State (SpanPos, Env) a -- Outer: compute match environment, handle dups
-type MI a = StateT Stack Maybe a -- Inner: decide match and bind variables
+type MO a = State (SpanPos, GL, Env) a -- Outer: compute match environment, handle dups
+type MI a = StateT (Globals, Stack) Maybe a -- Inner: decide match and bind variables
 type M v a = MO (Mode, v -> MI a) -- Analyze, produce matcher for v yielding a.
 
 matched :: Span -> Var -> Known -> M Value ()
 matched s i kn = do
   sp <- matchSP
   let collide _ _ = spanError s ("Duplicate pattern bindings for variable "++toString i) sp
-  modify $ (fmap (bindEnvWith collide i kn))
-  pure (AlwaysSucceeds, \v -> modify (`push` v))
+  modify $ bindEnvWith collide i kn
+  (_, gl, _) <- get
+  pure (AlwaysSucceeds, \v -> modify (push gl v))
 
 alwaysSucceed :: M a ()
 alwaysSucceed = pure (AlwaysSucceeds, \_ -> pure ())
@@ -257,20 +281,20 @@ matchFail :: MI a
 matchFail = lift Nothing
 
 matchSP :: MO SpanPos
-matchSP = gets fst
+matchSP = gets (\(sp, _, _) -> sp)
 
-matchError :: Span -> String -> MO a
+matchError :: HasCallStack => Span -> String -> MO a
 matchError s msg = spanError s msg <$> matchSP
 
 -- Inject match into evaluation
 withMatch :: HasCallStack => Span -> M b () -> EV -> Ef b (Maybe Value)
 withMatch s m t = do
-  (sp, (env, k)) <- ask
-  let ((mode, f), (_, (env', k'))) = runState m (sp, (mempty, k))
+  (sp, gl, (env, k)) <- ask
+  let ((mode, f), (_, _, (env', k'))) = runState m (sp, gl, (mempty, k))
   withEnv (env' <> env, k') $ do
     (kn, t') <- t
     pure (kn, \v -> do
-      vec <- getVec
+      vec <- getVecs
       case execStateT (f v) vec of
         Just _ | mode == AlwaysFails -> spanError s ("AlwaysFails succeeded!") sp
         Just vec' -> Just <$> local (const vec') t'
@@ -288,12 +312,13 @@ matches [p] [k] = do
 matches [] _ = error "Empty pats; shouldn't happen!"
 matches ps ks = do
   (mode, ms) <- matches' ps ks
+  (_, gl, _) <- get
   pure (mode, \vs -> do
     vec <- get
     case execStateT (ms vs) vec of
       Just vec' ->
         traceSt
-          (showsPp ps++" match "++showsPp vs)
+          (show gl ++ " " ++ showsPp ps++" match "++showsPp vs)
           (put vec')
       Nothing -> matchFail)
 
@@ -312,10 +337,11 @@ matches' ps ks = do
 match :: HasCallStack => Pat -> Known -> M Value ()
 match p kn = do
   (mode, f) <- match' p kn
+  (_, gl, _) <- get
   pure (mode, \val -> do
     vec <- get
     case execStateT (f val) vec of
-      Just vec' -> traceSt (showPp p++" matches "++showPp val) (put vec')
+      Just vec' -> traceSt (show gl ++ " "++showPp p++" matches "++showPp val) (put vec')
       Nothing -> matchFail)
 
 match' :: HasCallStack => Pat -> Known -> M Value ()
@@ -417,7 +443,7 @@ applyKnown s _ (Desc i _ (CloFun f)) v as =
       VDesc (Desc i' _ _)
         | i == i' -> local (const mempty) $ f vs
       VPAp (Desc i' _ _) vec bs
-        | i == i' -> local (const vec) $ f (bs <> vs)
+        | i == i' -> local (fmap (const vec)) $ f (bs <> vs)
       _ -> error (s++"applyKnown "++toString i++": bad closure "++showPp v'))
 
 applyUnknown :: HasCallStack =>
@@ -440,15 +466,15 @@ appWithDesc :: HasCallStack =>
   String -> Desc -> Stack -> Int -> [Value] -> EI Value
 appWithDesc s d@(Desc _ n (CloFun f)) vec nv vs
   | n > nv = pure $ VPAp d vec vs
-  | n == nv = local (const vec) $ f vs
+  | n == nv = local (fmap (const vec)) $ f vs
   | otherwise = do
       let (vs', vs'') = splitAt n vs
-      f' <- local (const vec) (f vs')
+      f' <- local (fmap (const vec)) (f vs')
       applyInner s f' vs''
 
 appDisjs :: HasCallStack => Span -> Var -> [([Pat], Exp)] -> [Known] -> Ef [Value] Value
 appDisjs s f ds knp = do
-  pes <- mapM (\(ps, e) -> withMatch (span ps) (matches ps knp) (eval e)) ds
+  pes <- mapM (\(ps, e) -> withMatch (span ps) (matches ps knp) (locally (eval e))) ds
   let kn = foldr1 (<>) (map fst pes)
       ms = map snd pes
   sp <- expSP
@@ -491,7 +517,7 @@ eval (List s (e:es)) = eval (App s (Id s Op Con "::") [e, List s es])
 eval (Case s e (_,es)) = do
   (ekn, e') <- eval e
   sp <- expSP
-  (kn, m) <- appDisjs s "<case>" (map (toDisj sp) es) [ekn]
+  (kn, m) <- locally $ appDisjs s "<case>" (map (toDisj sp) es) [ekn]
   pure (kn, do
     v <- e'
     m [v])
@@ -512,7 +538,7 @@ eval (If _ c t e) = do
     _ -> expError (span c) ("If statically non-boolean "++showPp ckn)
 eval (IfMatch _ p c t e) = do
   (ckn, c') <- eval c
-  (tkn, tm) <- withMatch (span p) (match p ckn) (eval t)
+  (tkn, tm) <- locally $ withMatch (span p) (match p ckn) (eval t)
   (ekn, e') <- eval e
   pure (tkn <> ekn, do
     v <- c'
@@ -538,7 +564,7 @@ evThings (D (BindExp e) : ts) = do
   (kn, r) <- evThings ts
   pure (kn, e' *> r)
 evThings (D (Def p e) : ts) = do
-  (ekn, e') <- eval e
+  (ekn, e') <- locally $ eval e
   (kn, m) <- withMatch (span p) (match p ekn) (evThings ts)
   pure (kn, do
     v <- e'
@@ -644,7 +670,7 @@ groupDef _ (_, d) ts = D d : ts
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =
   let (env, vec) = expand env0
-  in runReader (snd $ runReader (eval $ Block ds) (sp, env)) vec
+  in runReader (snd $ runReader (eval $ Block ds) (sp, Global, env)) (vec, mempty)
 
 -- Definitions of primitives
 
@@ -687,9 +713,10 @@ getPrim [n, v] =
     _ -> error ("Bad prim "++showPp v)
 getPrim as = error ("Bad args to prim "++showPp as)
 
-expand :: Map Var Value -> (Env, Vec Value)
+expand :: Map Var Value -> (Env, BV Value)
 expand e =
-  foldl (\((env, k), vec) (i, v) -> ((M.insert i (KnownValue v, k) env, k+1), push vec v))
+  foldl (\((env, k), vec) (i, v) ->
+           ((M.insert i (KnownValue v, (Global, k)) env, k+1), vpush vec v))
         ((mempty, 0), mempty)
         (M.toList e)
 
