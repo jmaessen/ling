@@ -20,8 +20,9 @@ data Span = S Int Int
 instance Eq Span where
   _ == _ = True
 
-uSpan :: Span -> Span -> Span
-uSpan (S p0 _) (S _ p3) = S p0 p3
+instance Semigroup Span where
+  S p0 p1 <> S p2 p3 = S (min p0 p1) (max p2 p3)
+
 
 data Mod = Mod SourcePos Defs Imports Defs
   deriving (Eq, Show)
@@ -116,7 +117,7 @@ instance IsAST t => IsAST [t] where
   isValid ts = concatMap isValid ts
   span [] = error "span []"
   span [a] = span a
-  span (a:as) = span a `uSpan` span as
+  span (a:as) = span a <> span as
   allSpans = concatMap allSpans
   fullParen ts = fullParen <$> ts
   noParen ts = noParen <$> ts
@@ -164,7 +165,7 @@ instance IsAST Exp where
   span (Wild s) = s
   span (Const s _) = s
   span (Ops e []) = span e
-  span (Ops e os) = span e `uSpan` span (snd $ last os)
+  span (Ops e os) = span e <> span (snd $ last os)
   span (Case s _ _) = s
   span (If s _ _ _) = s
   span (IfMatch s _ _ _ _) = s

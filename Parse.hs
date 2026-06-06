@@ -1,7 +1,8 @@
 {-# LANGUAGE ApplicativeDo, OverloadedStrings #-}
 module Parse(file, partialFile, toplevel,
              def, defs, block, exp,
-             unfix, unfixExp, ppWithSpan, SpanPos) where
+             unfix, unfixExp,
+             ppWithSpan, SpanPos, spanPrefix) where
 import AST
 import Control.Monad
 import Data.ByteString(ByteString)
@@ -12,7 +13,7 @@ import Data.Functor
 import Data.List(sort)
 import Data.Maybe
 import Data.Void(Void)
-import Data.Map hiding (empty)
+import Data.Map hiding (empty, foldr)
 import Data.Word(Word8)
 import Text.Megaparsec as P
 import Text.Megaparsec.Byte
@@ -36,6 +37,21 @@ spanPos ps ds =
       posns = fromAscList . fst $ attachSourcePos id offsets ps
       translate (S a b) = (posns ! a, posns ! b)
   in translate
+
+showsPos :: Pos -> ShowS
+showsPos = shows . unPos
+
+spanPrefix :: Span -> SpanPos -> String
+spanPrefix s sp =
+  case sp s of
+    (SourcePos f sline scol, SourcePos _ eline ecol) ->
+      foldr ($) ": " ([
+        (f++), (':':), showsPos sline, ('.':), showsPos scol, ('-':)
+      ] ++
+      if sline == eline then
+        [showsPos ecol]
+      else
+        [showsPos eline, ('.':), showsPos ecol])
 
 utf8satisfy :: MP m => (Char -> Bool) -> m ByteString
 utf8satisfy p = do
@@ -193,7 +209,7 @@ double :: MP m => Spacing -> m (Span, Double)
 double s = tok s $ label "<double>" (sign <*> float)
 
 binSpan :: (MP m, IsAST a, IsAST b) => (Span -> a -> b -> c) -> m a -> m b -> m c
-binSpan f pa pb = (\a b -> f (span a `uSpan` span b) a b) <$> pa <*> pb
+binSpan f pa pb = (\a b -> f (span a <> span b) a b) <$> pa <*> pb
 
 constant :: (a -> Constant) -> (Span, a) -> Exp
 constant c (s, v) = Const s (c v)
@@ -208,8 +224,8 @@ expSimp s =
   label "'char'" (try (constant EChar <$>
                        tok s (between (string "'") (string "'") charLiteral))) <|>
   -- Keyword expressions must come before ids and ops.
-  label "fn" ((\f a b -> Fn (f `uSpan` span b) a b) <$> key "fn" NL <*> exp NL <* keyOp "=" <*> exp s) <|>
-  label "if" ((\f i t e -> If (f `uSpan` span e) i t e) <$>
+  label "fn" ((\f a b -> Fn (f <> span b) a b) <$> key "fn" NL <*> exp NL <* keyOp "=" <*> exp s) <|>
+  label "if" ((\f i t e -> If (f <> span e) i t e) <$>
               key "if" NL <*> exp NL <* key "then" NL <*> exp NL <* key "else" NL <*> exp s) <|>
   -- ids and ops go next.
   (Wild <$> key "_" s) <|>
@@ -230,7 +246,7 @@ expParens =
 
 app :: [Exp] -> Exp
 app [e] = e
-app (e:es) = App (span e `uSpan` span (last es)) e es
+app (e:es) = App (span e <> span (last es)) e es
 app [] = error ("app []")
 
 ops :: Exp -> [(Exp, Exp)] -> Exp
@@ -367,7 +383,7 @@ unfixExp fs (OpExp s e) = OpExp s $ unfixExp fs e
 unfixExp fs (Ops e oes) = unfixOps fs e oes
 
 opApp :: Exp -> Exp -> Exp -> Exp
-opApp a op b = App (span a `uSpan` span b) op [a, b]
+opApp a op b = App (span a <> span b) op [a, b]
 
 unfixOps :: Fixities -> Exp -> [(Exp, Exp)] -> Exp
 unfixOps fs a [] = unfixExp fs a
