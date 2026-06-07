@@ -101,14 +101,6 @@ instance Semigroup Known where
     | a == b = KnownDesc a
   _ <> _ = Unknown
 
-vClo :: HasCallStack => Span -> Var -> Int -> [([Pat], Exp)] -> EV
-vClo s f n ds = do
-  (_, cf) <- locally $ appDisjs s f ds (replicate n Unknown)
-  let d = Desc f n (CloFun cf)
-  pure $ (KnownDesc d, do
-    (_, vec) <- getVecs
-    pure (VPAp d vec []))
-
 pattern VCon0 :: ConName -> Value
 pattern VCon0 c <- VDesc (Desc c 0 _) where
   VCon0 c =
@@ -190,8 +182,11 @@ mkPush Local = \v (g, s) -> (g, vpush s v)
 
 expPush :: EO Push
 expPush = do
-  (_, gl, _) <- ask
+  gl <- expGL
   pure (mkPush gl)
+
+expGL :: EO GL
+expGL = (\(_, gl, _) -> gl) <$> ask
 
 withEnv :: Env -> EO a -> EO a
 withEnv env = local (\(sp, gl, _) -> (sp, gl, env))
@@ -583,6 +578,18 @@ evThings (D (Fix _ _ _) : ts) = evThings ts
 evThings (D (Data _ (_,ds)) : ts) = foldr addCon (evThings ts) ds
 evThings (D (Struct _ _) : ts) = evThings ts
 evThings (t:_) = expError (span t) ("unexpected thing "++showPp t)
+
+vClo :: HasCallStack => Span -> Var -> Int -> [([Pat], Exp)] -> EV
+vClo s f n ds = do
+  (_, cf) <- locally $ appDisjs s f ds (replicate n Unknown)
+  let d = Desc f n (CloFun cf)
+  gl <- expGL
+  pure $ case gl of
+    Global ->
+      let v = VDesc d
+      in (KnownValue v, pure v)
+    Local ->
+      (KnownDesc d, (\(_, vec) -> VPAp d vec []) <$> getVecs)
 
 -- Store arity information about constructors to env
 addCon :: HasCallStack => (Span, Def) -> EV -> EV
