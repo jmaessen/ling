@@ -47,12 +47,17 @@ map f [] = []
 map f (m::ms) = f m :: map f ms
 
 concatMap : ('a -> ['b]) -> ['a] -> ['b]
-concatMap f [] = []
-concatMap f (x::xs) = f x <> concatMap f xs
+concatMap f xs = {
+  loop [] = []
+  loop (x::xs) = f x <> loop xs
+  loop xs
+}
 
 removes : ['a] -> [('a, ['a])]
-removes [] = []
-removes (a::as) = (a, as) :: map (fn (b, bs) = (b, a::bs)) (removes as)
+removes as = case as {
+  [] = []
+  (a::as) = (a, as) :: map fn {(b, bs) = (b, a::bs)} (removes as)
+}
 
 queens : Int -> [[Int]]
 queens n = queensFromTo n (fromTo 1 n)

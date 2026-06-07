@@ -26,7 +26,7 @@ type Error = Void
 
 type MP m = MonadParsec Error ByteString m
 
-data Spacing = NoNL | NL | BT deriving (Eq, Ord, Show)
+data Spacing = NoNL | NL | BT | NoBlock deriving (Eq, Ord, Show)
 
 type SpanPos = Span -> (SourcePos, SourcePos)
 
@@ -224,9 +224,11 @@ expSimp s =
   label "'char'" (try (constant EChar <$>
                        tok s (between (string "'") (string "'") charLiteral))) <|>
   -- Keyword expressions must come before ids and ops.
-  label "fn" ((\f a b -> Fn (f <> span b) a b) <$> key "fn" NL <*> exp NL <* keyOp "=" <*> exp s) <|>
+  label "fn" ((\f ds -> Fn (f <> span ds) ds) <$> key "fn" NL <*> block s) <|>
   label "if" ((\f i t e -> If (f <> span e) i t e) <$>
               key "if" NL <*> exp NL <* key "then" NL <*> exp NL <* key "else" NL <*> exp s) <|>
+  label "case" ((\c e ds -> Case (c <> span ds) e ds) <$>
+              key "case" NL <*> exp NoBlock <*> block s) <|>
   -- ids and ops go next.
   (Wild <$> key "_" s) <|>
   ((\(s', i) -> Id s' Ident Var i) <$> ident s) <|>
@@ -282,6 +284,7 @@ expApp s = label "application or simple expr" $ do
   app <$> some (try $ expSimp s)
 
 block :: MP m => Spacing -> m Defs
+block NoBlock = failure Nothing mempty
 block s = label "{block}" (between (bare NL (string "{")) (bare s (string "}")) defs)
 
 defs :: MP m => m Defs
@@ -361,7 +364,7 @@ unfixDef _  f@(Fix _ _ _) = f -- Or strip?
 unfixExp :: Fixities -> Exp -> Exp
 unfixExp _ e@(Id _ _ _ _) = e
 unfixExp fs (App s a b) = App s (unfixExp fs a) (unfixExp fs <$> b)
-unfixExp fs (Fn s a b) = Fn s (unfixExp fs a) (unfixExp fs b)
+unfixExp fs (Fn s ds) = Fn s $ unfix fs ds
 unfixExp fs (Asc s a b) = Asc s (unfixExp fs a) (unfixExp fs b)
 unfixExp fs (Arrow s a b) = Arrow s (unfixExp fs a) (unfixExp fs b)
 unfixExp _ e@(Wild _) = e

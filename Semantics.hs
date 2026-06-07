@@ -500,12 +500,10 @@ eval (Const _ c) = pure (KnownValue $ VConst c, pure $ VConst c)
 eval (Wild s) = expError s "_ is a pat, not a valid expr"
 eval e@(Arrow s _ _) = expError s (showPp e ++ " is a type, not a valid expr")
 eval e@(Ops _ _) = expError (span e) (showPp e ++ " residual infix operators.")
-eval (Fn s (Asc _ p _) e) = eval (Fn s p e)
-eval (Fn s (App s' (Asc _ p _) ps) e) = eval (Fn s (App s' p ps) e)
-eval (Fn s (App s' (App _ p ps) ps') e) =
-  eval (Fn s (App s' p (ps ++ ps')) e)
-eval (Fn s (App _ p ps) e) = vClo s "<anon>" (1 + length ps) [(p:ps, e)]
-eval (Fn s p e) = vClo s "<anon1>" 1 [([p], e)]
+eval (Fn s (_, ds)) = do
+  sp <- expSP
+  let (a, cs) = mkRhs sp s ds
+  vClo s "<anon>" a cs
 eval (Tuple _ es) = do
   es' <- traverse eval es
   let d = cDesc "()" (length es')
@@ -683,6 +681,22 @@ groupDef sp (s, Def (App _ (Id _ _ Var f) ps) e) (Fns ((s', ff, n, pes): fns) : 
 groupDef _ (s, Def (App _ (Id _ _ Var f) ps) e) ts =
   Fns [(s, f, length ps, [(ps, e)])] : ts
 groupDef _ (_, d) ts = D d : ts
+
+mkRhs :: HasCallStack => SpanPos -> Span -> [(Span, Def)] -> (Int, [([Exp], Exp)])
+mkRhs sp s0 ds = rhs ds Nothing where
+  rhs [] Nothing = spanError s0 "Empty anonymous function." sp
+  rhs [] (Just a) = (a, [])
+  rhs ((s, Def (App _ p ps) e) : ds') ma
+    | a' /= a =
+      spanError s ("arity "++show (length ps + 1)++
+                   " doesn't match prior clause "++ show a) sp
+    | otherwise =
+      (a, ((p:ps), e) : snd (rhs ds' (Just a)))
+    where a' = 1 + length ps
+          a = fromMaybe a' ma
+  rhs ((s, Def (Asc _ p _) e) : ds') a = rhs ((s, Def p e) : ds') a
+  rhs ((s, Def p e) : ds') a = rhs ((s, Def (App s p []) e) : ds') a
+  rhs ((s, _) : _) _ = spanError s ("invalid function clause.") sp
 
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =

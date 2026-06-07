@@ -6,7 +6,7 @@ import Prelude hiding (span)
 import Text.Megaparsec(SourcePos)
 import qualified Text.PrettyPrint as PP
 import Text.PrettyPrint(
-  Doc, (<+>), ($$), lbrace, rbrace, brackets, double, hang, hcat, hsep, sep,
+  Doc, (<+>), lbrace, rbrace, brackets, double, hang, hcat, hsep, sep,
   int, integer, nest, parens, punctuate, vcat)
 
 noSpan :: Span
@@ -55,7 +55,7 @@ data ConOrVar = Con | Var
 data Exp
   = Id Span OpOrIdent ConOrVar ByteString
   | App Span Exp [Exp]
-  | Fn Span Exp Exp
+  | Fn Span Defs
   | Asc Span Exp Exp
   | Arrow Span Exp Exp
   | Wild Span
@@ -129,8 +129,13 @@ ppOp e1 op e2 = hang (pp e1 <+> op) 2 (pp e2)
 text :: ByteString -> Doc
 text = PP.text . UTF8.toString
 
+ppBlock :: Doc -> Defs -> Doc
+ppBlock lhs (_, []) = lhs <+> text "{}"
+ppBlock lhs (_, [d]) = hsep [lhs, lbrace, nest 2 (pp d), rbrace]
+ppBlock lhs (_, ds) = vcat [lhs <+> lbrace, text "", nest 2 (pp ds), rbrace]
+
 ppDef :: Doc -> Doc -> Exp -> Doc
-ppDef lhs eq (Block (_, ds)) = (lhs <+> eq <+> lbrace) $$ vcat [nest 2 (pp ds), rbrace]
+ppDef lhs eq (Block ds) = ppBlock (lhs <+> eq) ds
 ppDef lhs eq e = hang (lhs <+> eq) 2 (pp e)
 
 allSpans2 :: (IsAST a, IsAST b) => a -> b -> [Span]
@@ -139,7 +144,7 @@ allSpans2 a b = allSpans a <> allSpans b
 instance IsAST Exp where
   isValid (Id _ _ _ _) = []
   isValid (App _ e1 e2) = isValid e1 <> isValid e2
-  isValid (Fn _ args body) = isArgs args <> isValid body
+  isValid (Fn _ body) = isFn body
   isValid (Asc _ e t) = isValid e <> isTy t
   isValid (Arrow s _ _) = [(s, "Arrow type in expression")]
   isValid (Wild s) = [(s, "Wildcard in expression")]
@@ -159,7 +164,7 @@ instance IsAST Exp where
   isValid (OpExp _ o) = isValid o
   span (Id s _ _ _) = s
   span (App s _ _) = s
-  span (Fn s _ _) = s
+  span (Fn s _) = s
   span (Asc s _ _) = s
   span (Arrow s _ _) = s
   span (Wild s) = s
@@ -179,7 +184,7 @@ instance IsAST Exp where
   span (OpExp s _) = s
   allSpans (Id s _ _ _) = [s]
   allSpans (App s e es) = s : allSpans (e:es)
-  allSpans (Fn s p e) = s : allSpans2 p e
+  allSpans (Fn s ds) = s : allSpans ds
   allSpans (Asc s t e) = s : allSpans2 t e
   allSpans (Arrow s a b) = s : allSpans2 a b
   allSpans (Wild s) = [s]
@@ -199,7 +204,7 @@ instance IsAST Exp where
   allSpans (OpExp s e) = s : allSpans e
   fullParen e@(Id _ _ _ _) = e
   fullParen (App s e1 es) = par (App s (fp e1) (fmap fp es))
-  fullParen (Fn s args body) = par (Fn s (fpe args) (fpe body))
+  fullParen (Fn s body) = par (Fn s (fp body))
   fullParen (Asc s e t) = par (Asc s (fp e) (fp t))
   fullParen (Arrow s a b) = par (Arrow s (fp a) (fp b))
   fullParen e@(Wild _) = e
@@ -221,10 +226,7 @@ instance IsAST Exp where
   fullParen (OpExp s e) = OpExp s (fpe e)
   noParen e@(Id _ _ _ _) = e
   noParen (App s e1 es) = App s (noParen e1) (noParen es)
-  noParen (Fn s (Paren s' p) body) = Fn s (Paren s' (noParen p)) (noParen body)
-  noParen (Fn s (Asc s' (Paren s'' p) t) body) =
-    Fn s (Asc s' (Paren s'' (noParen p)) (noParen t)) (noParen body)
-  noParen (Fn s args body) = Fn s (noParen args) (noParen body)
+  noParen (Fn s ds) = Fn s (noParen ds)
   noParen (Asc s e t) = Asc s (noParen e) (noParen t)
   noParen (Arrow s a b) = Arrow s (noParen a) (noParen b)
   noParen e@(Wild _) = e
@@ -246,34 +248,33 @@ instance IsAST Exp where
   pp (Id _ Op _ o) = parens (text o)
   pp (App _ o [a, b]) | null $ isOppy o = pp a <+> ppOppy o <+> pp b
   pp (App _ e1 e2) = pp e1 <+> sep (pp <$> e2)
-  pp (Fn _ args body) =
-    ppDef (PP.text "fn" <+> pp args) (PP.text "=") body
-  pp (Asc _ e t) = ppOp e (PP.text ":") t
-  pp (Arrow _ a b) = ppOp a (PP.text "->") b
-  pp (Wild _) = PP.text "_"
+  pp (Fn _ body) = ppBlock (text "fn") body
+  pp (Asc _ e t) = ppOp e (text ":") t
+  pp (Arrow _ a b) = ppOp a (text "->") b
+  pp (Wild _) = text "_"
   pp (Const _ (EInt i)) = integer i
   pp (Const _ (EFloat d)) = double d
   pp (Const _ (EChar c)) = PP.text (show c)
   pp (Const _ (EString s)) = PP.text (show s)
   pp (Ops e []) = pp e
   pp (Ops e ((o, e2) : es)) = ppOp e (ppOppy o) (Ops e2 es)
-  pp (Case _ e ds) = ppDef (PP.text "case") (pp e) (Block ds)
+  pp (Case _ e ds) = ppDef (text "case") (pp e) (Block ds)
   pp (If _ i t e) =
-    vcat [PP.text "if" <+> pp i,
-          hang (PP.text "then") 2 (pp t), hang (PP.text "else") 2 (pp e)]
+    vcat [text "if" <+> pp i,
+          hang (text "then") 2 (pp t), hang (text "else") 2 (pp e)]
   pp (IfMatch _ p i t e) =
-    vcat [PP.text "if" <+> hang (pp p <+> PP.text "<-") 4 (pp i),
-          hang (PP.text "then") 2 (pp t), hang (PP.text "else") 2 (pp e)]
-  pp (Dot _ (e:es)) = pp e <> hcat ((PP.text "." <>) . pp <$> es)
+    vcat [text "if" <+> hang (pp p <+> text "<-") 4 (pp i),
+          hang (text "then") 2 (pp t), hang (text "else") 2 (pp e)]
+  pp (Dot _ (e:es)) = pp e <> hcat ((text "." <>) . pp <$> es)
   pp (Dot _ []) = PP.empty
   pp (Paren _ e) = parens (pp e)
-  pp (Tuple _ es) = parens (hsep $ punctuate (PP.text ",") (pp <$> es))
-  pp (List _ es) = brackets (hsep $ punctuate (PP.text ",") (pp <$> es))
+  pp (Tuple _ es) = parens (hsep $ punctuate (text ",") (pp <$> es))
+  pp (List _ es) = brackets (hsep $ punctuate (text ",") (pp <$> es))
   pp (Do _ p e ds) =
-    ppDef (PP.text "do") (hang (pp p <+> PP.text "<-") 4 (pp e)) (Block ds)
-  pp (Assign _ l e) = ppOp l (PP.text ":=") e
-  pp (Block ds) = vcat [lbrace, PP.text "", nest 2 (pp ds), rbrace]
-  pp (OpExp _ e) = hcat [PP.text "`", pp e, PP.text "`"]
+    ppDef (text "do") (hang (pp p <+> text "<-") 4 (pp e)) (Block ds)
+  pp (Assign _ l e) = ppOp l (text ":=") e
+  pp (Block ds) = ppBlock mempty ds
+  pp (OpExp _ e) = hcat [text "`", pp e, text "`"]
 
 isOppy :: Exp -> ValidErrs
 isOppy (Id _ Op _ _) = []
@@ -289,6 +290,14 @@ ppOppy e = pp (OpExp (span e) e)
 isArgs :: Exp -> ValidErrs
 isArgs (App _ a e) = isArgs a <> concatMap isPat e
 isArgs e = isPat e
+
+isFnBind :: (Span, Def) -> ValidErrs
+isFnBind (_, Def p e) = isArgs p ++ isValid e
+isFnBind (s, _) = [(s, "Not a valid function disjunct")]
+
+isFn :: Defs -> ValidErrs
+isFn (s, []) = [(s, "Empty function definiton")]
+isFn (_, ps) = concatMap isFnBind ps
 
 isPat :: Exp -> ValidErrs
 isPat (App _ a es) = isPatL a <> concatMap isPat es
@@ -340,12 +349,12 @@ instance IsAST Def where
   noParen (Struct pat ds) = Struct (noParen pat) (noParen ds)
   noParen d@(Fix _ _ _) = d
   pp (BindExp e) = pp e
-  pp (Def pat e) = ppDef (pp pat) (PP.text "=") e
-  pp (Data pat ds) = ppDef (pp pat) (PP.text "= data") (Block ds)
-  pp (Struct pat ds) = ppDef (pp pat) (PP.text "= struct") (Block ds)
-  pp (Fix L i (_, o)) = PP.text "infixl" <+> int i <+> text o
-  pp (Fix R i (_, o)) = PP.text "infixr" <+> int i <+> text o
-  pp (Fix None i (_, o)) = PP.text "infix" <+> int i <+> text o
+  pp (Def pat e) = ppDef (pp pat) (text "=") e
+  pp (Data pat ds) = ppDef (pp pat) (text "= data") (Block ds)
+  pp (Struct pat ds) = ppDef (pp pat) (text "= struct") (Block ds)
+  pp (Fix L i (_, o)) = text "infixl" <+> int i <+> text o
+  pp (Fix R i (_, o)) = text "infixr" <+> int i <+> text o
+  pp (Fix None i (_, o)) = text "infix" <+> int i <+> text o
 
 isLHS :: Exp -> ValidErrs
 isLHS (App _ a es) = isLHS a <> concatMap isPat es
