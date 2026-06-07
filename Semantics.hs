@@ -29,6 +29,7 @@ showPp = show . pp
 showsPp :: (IsAST a) => [a] -> String
 showsPp as = show (PP.fsep (pp <$> as))
 
+{-
 -- List model for Vec
 type BV a = [a]
 vpush :: BV a -> a -> BV a
@@ -36,17 +37,16 @@ vpush v a = v ++ [a]
 
 (!) :: HasCallStack => BV a -> Int -> a
 (!) = (!!)
+-}
 
-{-
 -- BakerVec model for Vec
 type BV a = V.Vec a
 
-vpush :: Vec a -> a -> Vec a
+vpush :: BV a -> a -> BV a
 vpush = V.push
 
-(!) :: BV a -> Ofs -> a
+(!) :: BV a -> Int -> a
 (!) = (V.!)
--}
 
 type ConName = ByteString
 type FieldName = ByteString
@@ -83,6 +83,8 @@ data Value
   | VStruct (Map FieldName Value)
   deriving (Eq, Show)
 
+{-# COMPLETE VConst, VDesc, VPAp, VCon, VStruct #-}
+
 data Known
   = Unknown
   | KnownValue Value
@@ -116,8 +118,6 @@ pattern VCon :: ConName -> Int -> [Value] -> Value
 pattern VCon c n vs <- VObj (Desc c n _) vs where
   VCon c n vs =
     VObj (Desc c n (CloFun (\_ -> error ("Applying already-built "++toString c)))) vs
-
-{-# COMPLETE VConst, VDesc, VPAp, VCon, VStruct #-}
 
 toList :: Value -> Maybe [Value]
 toList (VCon0 "[]") = Just []
@@ -193,7 +193,7 @@ withEnv env = local (\(sp, gl, _) -> (sp, gl, env))
 locally :: EO a -> EO a
 locally = local modGL where
   modGL s@(_, Local, _) = s
-  modGL (sp, Global, (env, k)) = (sp, Local, (env, 0))
+  modGL (sp, Global, (env, _)) = (sp, Local, (env, 0))
 
 getEnv :: EO Env
 getEnv = asks (\(_, _, env) -> env)
