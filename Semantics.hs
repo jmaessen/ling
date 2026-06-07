@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, ApplicativeDo, PatternSynonyms, LambdaCase #-}
-module Semantics where
+module Semantics(evalTop) where
 import Control.Monad
 import Control.Monad.Reader
 import Control.Monad.State
@@ -172,6 +172,7 @@ type EI a = Reader (Globals, Stack) a -- Inner, actual evaluation.
 type EO a = Reader (SpanPos, GL, Env) a   -- Outer, environment and analysis.
 type Ef b a = EO (Known, b -> EI a) -- Analysis parameterized by input
 type EV = EO (Known, EI Value) -- Analyze and yield a value.
+type Push = Value -> (Globals, Stack) -> (Globals, Stack)
 
 bindEnvWith :: ((Known, Ofs) -> (Known, Ofs) -> (Known, Ofs)) ->
                Var -> Known -> (SpanPos, GL, Env) -> (SpanPos, GL, Env)
@@ -183,9 +184,14 @@ lookupEnv s i (sp, _, (env, _)) =
   fromMaybe (spanError s ("Unbound variable "++toString i) sp) $
     M.lookup i env
 
-push :: GL -> Value -> (Globals, Stack) -> (Globals, Stack)
-push Global v (g, s) = (vpush g v, s)
-push Local v (g, s) = (g, vpush s v)
+mkPush :: GL -> Push
+mkPush Global = \v (g, s) -> (vpush g v, s)
+mkPush Local = \v (g, s) -> (g, vpush s v)
+
+expPush :: EO Push
+expPush = do
+  (_, gl, _) <- ask
+  pure (mkPush gl)
 
 withEnv :: Env -> EO a -> EO a
 withEnv env = local (\(sp, gl, _) -> (sp, gl, env))
@@ -194,9 +200,6 @@ locally :: EO a -> EO a
 locally = local modGL where
   modGL s@(_, Local, _) = s
   modGL (sp, Global, (env, _)) = (sp, Local, (env, 0))
-
-getEnv :: EO Env
-getEnv = asks (\(_, _, env) -> env)
 
 expSP :: EO SpanPos
 expSP = asks (\(sp, _, _) -> sp)
@@ -225,18 +228,20 @@ fixEnv a inner = do
       k' = k + length vs
       env' = M.fromList (zipWith (\(i, (kn, _)) n -> (i,(kn, (gl, n)))) vs [k..]) <> env
   (kn, inner') <- withEnv (env', k') inner
+  push <- expPush
   pure (kn, do
     vec <- getVecs
-    let vec' = foldl (\ve (_, (_, f)) -> push gl (runReader f vec') ve) vec vs
+    let vec' = foldl (\ve (_, (_, f)) -> push (runReader f vec') ve) vec vs
     local (const vec') inner')
 
 -- Handles a *constant* binding (constructor def)
 conBinding :: Var -> Value -> EV -> EV
 conBinding i v r = do
   (_, gl, _) <- ask
+  let push = mkPush gl
   local (bindEnvWith const i (KnownValue v)) $ do
     (kn, r') <- r
-    pure (kn, local (push gl v) r')
+    pure (kn, local (push v) r')
 
 -- Match monad
 data Mode = AlwaysSucceeds | MayFail | AlwaysFails deriving (Eq, Show)
@@ -265,8 +270,7 @@ matched s i kn = do
   sp <- matchSP
   let collide _ _ = spanError s ("Duplicate pattern bindings for variable "++toString i) sp
   modify $ bindEnvWith collide i kn
-  (_, gl, _) <- get
-  pure (AlwaysSucceeds, \v -> modify (push gl v))
+  withPush AlwaysSucceeds $ \push v -> modify (push v)
 
 alwaysSucceed :: M a ()
 alwaysSucceed = pure (AlwaysSucceeds, \_ -> pure ())
@@ -285,6 +289,11 @@ matchSP = gets (\(sp, _, _) -> sp)
 
 matchError :: HasCallStack => Span -> String -> MO a
 matchError s msg = spanError s msg <$> matchSP
+
+withPush :: Mode -> (Push -> a) -> MO (Mode, a)
+withPush m f = do
+  (_, gl, _) <- get
+  pure (m, f (mkPush gl))
 
 -- Inject match into evaluation
 withMatch :: HasCallStack => Span -> M b () -> EV -> Ef b (Maybe Value)
@@ -312,13 +321,12 @@ matches [p] [k] = do
 matches [] _ = error "Empty pats; shouldn't happen!"
 matches ps ks = do
   (mode, ms) <- matches' ps ks
-  (_, gl, _) <- get
   pure (mode, \vs -> do
     vec <- get
     case execStateT (ms vs) vec of
       Just vec' ->
         traceSt
-          (show gl ++ " " ++ showsPp ps++" match "++showsPp vs)
+          (showsPp ps++" match "++showsPp vs)
           (put vec')
       Nothing -> matchFail)
 
@@ -337,11 +345,10 @@ matches' ps ks = do
 match :: HasCallStack => Pat -> Known -> M Value ()
 match p kn = do
   (mode, f) <- match' p kn
-  (_, gl, _) <- get
   pure (mode, \val -> do
     vec <- get
     case execStateT (f val) vec of
-      Just vec' -> traceSt (show gl ++ " "++showPp p++" matches "++showPp val) (put vec')
+      Just vec' -> traceSt (showPp p++" matches "++showPp val) (put vec')
       Nothing -> matchFail)
 
 match' :: HasCallStack => Pat -> Known -> M Value ()
@@ -382,7 +389,7 @@ match' p@(App s (Id _ _ Con con) as) kn = do -- Can't avoid the match now
   (m, fs) <- matches' as kns
   let mode AlwaysSucceeds (KnownDesc (Desc con' i _)) | con == con' && i == len = AlwaysSucceeds
       mode _ (KnownDesc (Desc con' i _)) | con /= con' || i /= len = AlwaysFails
-      mode _ _ = MayFail <> m
+      mode _ _ = meet MayFail m
   sp <- matchSP
   pure (mode m kn, \case
     v@(VCon cn n rs)
@@ -543,10 +550,13 @@ eval (IfMatch _ p c t e) = do
   pure (tkn <> ekn, do
     v <- c'
     fromMaybeM e' (tm v))
-eval (Block b) = do
-  ds <- (`groupDefs` b) <$> expSP
-  evThings ds
+eval (Block b) = locally (evDefs b)
 eval e = expError (span e) ("eval: Unhandled expression\n  "++showPp e++"\n  "++show e)
+
+evDefs :: Defs -> EV
+evDefs b = do
+  ds <- (`groupDefs` b) <$> expSP
+  locally $ evThings ds
 
 evThings :: HasCallStack => [BlockThing] -> EV
 evThings [] = do
@@ -670,7 +680,7 @@ groupDef _ (_, d) ts = D d : ts
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =
   let (env, vec) = expand env0
-  in runReader (snd $ runReader (eval $ Block ds) (sp, Global, env)) (vec, mempty)
+  in runReader (snd $ runReader (evDefs ds) (sp, Global, env)) (vec, mempty)
 
 -- Definitions of primitives
 
