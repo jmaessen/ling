@@ -2,7 +2,7 @@
 module Data.BakerVec(
   Vec,
   replicate,
-  (!), push, pop, pushAndIndex,
+  (!), empty, push, pop, pushAndIndex,
   writeVec,
   persist, copy,
   withList
@@ -184,7 +184,7 @@ resetMut :: Storage a -> Storage a
 resetMut (Storage w _ arr) = Storage w 0 arr
 
 -- First, the IO versions of the operations.
-empty :: Vec a
+empty :: HasCallStack => Vec a
 empty = Vec 0 undefined
 
 replicateIO :: Len -> a -> IO (Vec a)

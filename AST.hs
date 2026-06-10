@@ -99,6 +99,9 @@ fpe = unpar . fp
 class PP t where
   pp :: t -> Doc
 
+instance PP ByteString where
+  pp = text
+
 class PP t => IsAST t where
   isValid :: t -> ValidErrs
   span :: t -> Span

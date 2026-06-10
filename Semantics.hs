@@ -35,6 +35,9 @@ type BV a = [a]
 vpush :: BV a -> a -> BV a
 vpush v a = v ++ [a]
 
+empty :: BV a
+empty = []
+
 (!) :: HasCallStack => BV a -> Int -> a
 (!) = (!!)
 -}
@@ -44,6 +47,9 @@ type BV a = V.Vec a
 
 vpush :: BV a -> a -> BV a
 vpush = V.push
+
+empty :: HasCallStack => BV a
+empty = V.empty
 
 (!) :: BV a -> Int -> a
 (!) = (V.!)
@@ -204,10 +210,13 @@ withEnv :: Env -> EO a -> EO a
 withEnv env = local (\(sp, gl, _) -> (sp, gl, env))
 
 withClo :: Closure -> EI a -> EI a
-withClo clo = local (\(g,_,_) -> (g, clo, mempty))
+withClo clo = local (\(g,_,_) -> (g, clo, empty))
 
-withSameEnv :: EI a -> EI a
-withSameEnv = local (\(g, clo, _) -> (g, clo, mempty))
+withSameClo :: EI a -> EI a
+withSameClo = local (\(g, clo, _) -> (g, clo, empty))
+
+withNoClo :: EI a -> EI a
+withNoClo = local (\(g, _, _) -> (g, empty, empty))
 
 withDiffEnv :: EO a -> EO a
 withDiffEnv = local (\(sp, gl, (env, k)) -> (sp, gl, (diffEnv <$> env, k))) where
@@ -219,6 +228,7 @@ locally = local modGL where
   modGL (sp, Global, (env, _)) = (sp, Local, (env, 0))
   modGL s = s
 
+-- Convert local env into closure env.
 closed :: EO a -> EO a
 closed = local (\(sp, gl, (env, _)) -> (sp, gl, (closurize env, 0))) where
   closurize env = do
@@ -465,24 +475,26 @@ apply s (kn, f) as = app (knownArity kn)
 applyKnown :: HasCallStack =>
   String -> Known -> EI Value -> [(Known, EI Value)] -> (Known, EI Value)
 applyKnown _ (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ as
-  | all (isKnownValue . fst) as = do -- Constant fold!
-      let r = runReader (f [ v | (KnownValue v, _) <- as]) mempty
+  | False && all (isKnownValue . fst) as = do -- Constant fold!
+      -- Needs re-thinking: Can't run top level fns in empty global env!
+      -- That *only* works with primitives.
+      let r = runReader (f [ v | (KnownValue v, _) <- as]) (empty, empty, empty)
       (KnownValue r, pure r)
   | otherwise =
     (Unknown, do
       vs <- mapM snd as
-      f vs)
+      withNoClo $ f vs)
 applyKnown _ (KnownDesc SameEnv (Desc _ _ (CloFun f))) _ as =
   (Unknown, do
     vs <- mapM snd as
-    withSameEnv $ f vs)
+    withSameClo $ f vs)
 applyKnown s (KnownDesc _ (Desc i _ (CloFun f))) v as =
   (Unknown, do
     v' <- v
     vs <- mapM snd as
     case v' of
       VDesc (Desc i' _ _)
-        | i == i' -> local (const mempty) $ f vs
+        | i == i' -> local (\(g, _, _) -> (g, empty, empty)) $ f vs
       VPAp (Desc i' _ _) vec bs
         | i == i' -> withClo vec $ f (bs <> vs)
       _ -> error (s++"applyKnown "++toString i++": bad closure "++showPp v'))
@@ -497,7 +509,7 @@ applyUnknown s f as =
     applyInner s v vs)
 
 applyInner :: HasCallStack => String -> Value -> [Value] -> EI Value
-applyInner s (VDesc d) vs = appWithDesc s d mempty (length vs) vs
+applyInner s (VDesc d) vs = appWithDesc s d empty (length vs) vs
 applyInner s (VPAp d vec as) bs = do
   let vs = as <> bs
   appWithDesc s d vec (length vs) vs
@@ -589,21 +601,21 @@ eval e = expError (span e) ("eval: Unhandled expression\n  "++showPp e++"\n  "++
 evDefs :: Defs -> EV
 evDefs b = do
   ds <- (`groupDefs` b) <$> expSP
-  locally $ evThings ds
+  evThings ds
 
 evThings :: HasCallStack => [BlockThing] -> EV
 evThings [] = do
   let v = VStruct mempty
   pure (KnownValue v, pure v)
 evThings [BTS m] = do
-  ms <- traverse eval m
+  ms <- locally $ traverse eval m
   pure (Unknown, VStruct <$> sequenceA (snd <$> ms))
 evThings (D (BindExp (Asc _ (Id _ _ _ _) _)) : ts@(_:_)) = evThings ts
-evThings [D (BindExp e)] = eval e
+evThings [D (BindExp e)] = locally $ eval e
 evThings (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evThings ts)
   where clo (s, v, n, ves) = (v,) <$> vClo s v n ves
 evThings (D (BindExp e) : ts) = do
-  (_, e') <- eval e
+  (_, e') <- locally $ eval e
   (kn, r) <- evThings ts
   pure (kn, e' >>= \v -> v `seq` r)
 evThings (D (Def p e) : ts) = do
@@ -735,7 +747,7 @@ mkRhs sp s0 ds = rhs ds Nothing where
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =
   let (env, vec) = expand env0
-  in runReader (snd $ runReader (evDefs ds) (sp, Global, env)) (vec, mempty, mempty)
+  in runReader (snd $ runReader (evDefs ds) (sp, Global, env)) (vec, empty, empty)
 
 -- Definitions of primitives
 
@@ -778,11 +790,11 @@ getPrim [n, v] =
     _ -> error ("Bad prim "++showPp v)
 getPrim as = error ("Bad args to prim "++showPp as)
 
-expand :: Map Var Value -> (Env, BV Value)
+expand :: HasCallStack => Map Var Value -> (Env, BV Value)
 expand e =
   foldl (\((env, k), vec) (i, v) ->
            ((M.insert i (KnownValue v, (Global, k)) env, k+1), vpush vec v))
-        ((mempty, 0), mempty)
+        ((mempty, 0), empty)
         (M.toList e)
 
 env0 :: Map Var Value
