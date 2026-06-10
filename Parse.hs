@@ -225,8 +225,7 @@ expSimp s =
                        tok s (between (string "'") (string "'") charLiteral))) <|>
   -- Keyword expressions must come before ids and ops.
   label "fn" ((\f ds -> Fn (f <> span ds) ds) <$> key "fn" NL <*> block s) <|>
-  label "if" ((\f i t e -> If (f <> span e) i t e) <$>
-              key "if" NL <*> exp NL <* key "then" NL <*> exp NL <* key "else" NL <*> exp s) <|>
+  label "if" ((\f i k -> k f i) <$> key "if" NL <*> exp NL <*> ifRest s) <|>
   label "case" ((\c e ds -> Case (c <> span ds) e ds) <$>
               key "case" NL <*> exp NoBlock <*> block s) <|>
   -- ids and ops go next.
@@ -235,6 +234,13 @@ expSimp s =
   ((\(s', i) -> Id s' Ident Con i) <$> con s) <|>
   (constant EInt <$> int s) <|>
   (constant EFloat <$> double s)
+
+ifRest :: MP m => Spacing -> m (Span -> Exp -> Exp)
+ifRest s =
+  ((\i t e f p -> IfMatch (f <> span e) p i t e) <$
+   keyOp "=" <*> exp NL <* key "then" NL <*> exp NL <* key "else" NL <*> exp s) <|>
+  ((\t e f i -> If (f <> span e) i t e) <$
+   key "then" NL <*> exp NL <* key "else" NL <*> exp s)
 
 -- Parse some stuff inside parens
 expParens :: MP m => m (Span -> Exp)

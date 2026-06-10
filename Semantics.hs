@@ -54,11 +54,12 @@ type Var = ByteString
 
 type Ofs = (GL, Int)
 
-data GL = Global | Local
+data GL = Global | Closure | Local
   deriving (Eq, Show)
 
 type Env = (Map Var (Known, Ofs), Int)
 type Stack = BV Value
+type Closure = BV Value
 type Globals = BV Value
 
 type Pat = Exp
@@ -156,15 +157,26 @@ fromMaybe d = maybe d id
 fromMaybeM :: Monad m => m a -> m (Maybe a) -> m a
 fromMaybeM d m = m >>= maybe d pure
 
+fst3 :: (a, b, c) -> a
+fst3 (a, _, _) = a
+
+snd3 :: (a, b, c) -> b
+snd3 (_, b, _) = b
+
+thd3 :: (a, b, c) -> c
+thd3 (_, _, c) = c
+
 spanError :: HasCallStack => Span -> String -> SpanPos -> a
 spanError s msg sp = error (spanPrefix s sp ++ msg)
 
 -- Evaluation (environment) monads
-type EI a = Reader (Globals, Stack) a -- Inner, actual evaluation.
-type EO a = Reader (SpanPos, GL, Env) a   -- Outer, environment and analysis.
+type Outer = (SpanPos, GL, Env)   -- Outer, environment and analysis info.
+type Inner = (Globals, Closure, Stack)  -- Inner, factored value state.
+type EO a = Reader Outer a  -- Outer evaluation monad: compilation.
+type EI a = Reader Inner a -- Inner, actual evaluation.
 type Ef b a = EO (Known, b -> EI a) -- Analysis parameterized by input
 type EV = EO (Known, EI Value) -- Analyze and yield a value.
-type Push = Value -> (Globals, Stack) -> (Globals, Stack)
+type Push = Value -> Inner -> Inner
 
 bindEnvWith :: ((Known, Ofs) -> (Known, Ofs) -> (Known, Ofs)) ->
                Var -> Known -> (SpanPos, GL, Env) -> (SpanPos, GL, Env)
@@ -177,8 +189,9 @@ lookupEnv s i (sp, _, (env, _)) =
     M.lookup i env
 
 mkPush :: GL -> Push
-mkPush Global = \v (g, s) -> (vpush g v, s)
-mkPush Local = \v (g, s) -> (g, vpush s v)
+mkPush Global = \v (g, c, s) -> (vpush g v, c, s)
+mkPush Local = \v (g, c, s) -> (g, c, vpush s v)
+mkPush Closure = error "mkPush Closure isn't a thing."
 
 expPush :: EO Push
 expPush = do
@@ -191,10 +204,23 @@ expGL = (\(_, gl, _) -> gl) <$> ask
 withEnv :: Env -> EO a -> EO a
 withEnv env = local (\(sp, gl, _) -> (sp, gl, env))
 
+withClo :: Closure -> EI a -> EI a
+withClo clo = local (\(g,_,_) -> (g, clo, mempty))
+
 locally :: EO a -> EO a
 locally = local modGL where
-  modGL s@(_, Local, _) = s
   modGL (sp, Global, (env, _)) = (sp, Local, (env, 0))
+  modGL s = s
+
+closed :: EO a -> EO a
+closed = local (\(sp, gl, (env, _)) -> (sp, gl, (closurize env, 0))) where
+  closurize env = do
+    let -- Figure out next available closure slot
+        k0 = 1 + maximum (-1 : [ k | (_, (Closure, k)) <- M.elems env ])
+        -- Assign all locals to closure slots.
+        close (kn, (Local, k)) = (kn, (Closure, k + k0))
+        close e = e
+    close <$> env
 
 expSP :: EO SpanPos
 expSP = asks (\(sp, _, _) -> sp)
@@ -202,7 +228,7 @@ expSP = asks (\(sp, _, _) -> sp)
 expError :: HasCallStack => Span -> String -> EO a
 expError s msg = spanError s msg <$> expSP
 
-getVecs :: EI (Globals, Stack)
+getVecs :: EI Inner
 getVecs = ask
 
 findEnv :: HasCallStack => Span -> Var -> EV
@@ -210,8 +236,9 @@ findEnv s i = do
   (kn, (gl, o)) <- asks (lookupEnv s i)
   pure (kn,
     case gl of
-      Global -> asks ((! o) . fst)
-      Local -> asks ((! o) . snd))
+      Global -> asks ((! o) . fst3)
+      Closure -> asks ((! o) . snd3)
+      Local -> asks ((! o) . thd3))
 
 -- Takes a computation that computes bindings and evaluates
 -- it in an env containing those bindings, then evaluates
@@ -256,8 +283,8 @@ meet AlwaysSucceeds o = o
 meet MayFail AlwaysFails = AlwaysFails
 meet MayFail _ = MayFail
 
-type MO a = State (SpanPos, GL, Env) a -- Outer: compute match environment, handle dups
-type MI a = StateT (Globals, Stack) Maybe a -- Inner: decide match and bind variables
+type MO a = State Outer a -- Outer: compute match environment, handle dups
+type MI a = StateT Inner Maybe a -- Inner: decide match and bind variables
 type M v a = MO (Mode, v -> MI a) -- Analyze, produce matcher for v yielding a.
 
 matched :: Span -> Var -> Known -> M Value ()
@@ -445,7 +472,7 @@ applyKnown s _ (Desc i _ (CloFun f)) v as =
       VDesc (Desc i' _ _)
         | i == i' -> local (const mempty) $ f vs
       VPAp (Desc i' _ _) vec bs
-        | i == i' -> local (fmap (const vec)) $ f (bs <> vs)
+        | i == i' -> withClo vec $ f (bs <> vs)
       _ -> error (s++"applyKnown "++toString i++": bad closure "++showPp v'))
 
 applyUnknown :: HasCallStack =>
@@ -468,10 +495,10 @@ appWithDesc :: HasCallStack =>
   String -> Desc -> Stack -> Int -> [Value] -> EI Value
 appWithDesc s d@(Desc _ n (CloFun f)) vec nv vs
   | n > nv = pure $ VPAp d vec vs
-  | n == nv = local (fmap (const vec)) $ f vs
+  | n == nv = withClo vec $ f vs
   | otherwise = do
       let (vs', vs'') = splitAt n vs
-      f' <- local (fmap (const vec)) (f vs')
+      f' <- withClo vec (f vs')
       applyInner s f' vs''
 
 appDisjs :: HasCallStack => Span -> Var -> [([Pat], Exp)] -> [Known] -> Ef [Value] Value
@@ -579,7 +606,7 @@ evThings (t:_) = expError (span t) ("unexpected thing "++showPp t)
 
 vClo :: HasCallStack => Span -> Var -> Int -> [([Pat], Exp)] -> EV
 vClo s f n ds = do
-  (_, cf) <- locally $ appDisjs s f ds (replicate n Unknown)
+  (_, cf) <- locally $ closed $ appDisjs s f ds (replicate n Unknown)
   let d = Desc f n (CloFun cf)
   gl <- expGL
   pure $ case gl of
@@ -587,7 +614,8 @@ vClo s f n ds = do
       let v = VDesc d
       in (KnownValue v, pure v)
     Local ->
-      (KnownDesc d, (\(_, vec) -> VPAp d vec []) <$> getVecs)
+      (KnownDesc d, (\(_, clo, vec) -> VPAp d (clo <> vec) []) <$> getVecs)
+    Closure -> error "gl of Closure isn't a thing."
 
 -- Store arity information about constructors to env
 addCon :: HasCallStack => (Span, Def) -> EV -> EV
@@ -701,7 +729,7 @@ mkRhs sp s0 ds = rhs ds Nothing where
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =
   let (env, vec) = expand env0
-  in runReader (snd $ runReader (evDefs ds) (sp, Global, env)) (vec, mempty)
+  in runReader (snd $ runReader (evDefs ds) (sp, Global, env)) (vec, mempty, mempty)
 
 -- Definitions of primitives
 

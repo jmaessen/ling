@@ -43,8 +43,10 @@ a <> [] = a
 (a::as) <> b = a :: as <> b
 
 map : ('a -> 'b) -> ['a] -> ['b]
-map f [] = []
-map f (m::ms) = f m :: map f ms
+map f ms =
+  if (m::ms) = ms then
+    f m :: map f ms
+  else []
 
 concatMap : ('a -> ['b]) -> ['a] -> ['b]
 concatMap f xs = {
@@ -92,7 +94,9 @@ showsInt i r = intToStr i :: r
 
 interShow :
   ('a -> [String] -> [String]) -> String -> String -> ['a] -> [String] -> [String]
-interShow sh pre sep [] r = r
-interShow sh pre sep (a::as) r = pre :: sh a (interShow sh sep sep as r)
+interShow sh = fn { pre = fn { sep = fn {
+  [] r = r
+  (a::as) r = pre :: sh a (interShow sh sep sep as r)
+}}}
 
 putStr (show (queens 8))

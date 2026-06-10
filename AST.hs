@@ -263,7 +263,7 @@ instance IsAST Exp where
     vcat [text "if" <+> pp i,
           hang (text "then") 2 (pp t), hang (text "else") 2 (pp e)]
   pp (IfMatch _ p i t e) =
-    vcat [text "if" <+> hang (pp p <+> text "<-") 4 (pp i),
+    vcat [text "if" <+> hang (pp p <+> text "=") 4 (pp i),
           hang (text "then") 2 (pp t), hang (text "else") 2 (pp e)]
   pp (Dot _ (e:es)) = pp e <> hcat ((text "." <>) . pp <$> es)
   pp (Dot _ []) = PP.empty
