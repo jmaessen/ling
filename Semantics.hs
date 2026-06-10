@@ -88,20 +88,26 @@ data Value
 
 {-# COMPLETE VConst, VDesc, VPAp, VCon, VStruct #-}
 
+data SimEnv = SameEnv | DiffEnv deriving (Eq, Show)
+
 data Known
   = Unknown
   | KnownValue Value
-  | KnownDesc Desc
+  | KnownDesc SimEnv Desc
   deriving (Eq, Show)
+
+sameEnv :: Known -> Known
+sameEnv (KnownDesc _ d) = KnownDesc SameEnv d
+sameEnv kn = kn
 
 -- The information-theoretic join on Known
 instance Semigroup Known where
   a <> b
     | a == b = a
   KnownValue (VObj a _) <> KnownValue (VObj b _)
-    | a == b = KnownDesc a
+    | a == b = KnownDesc DiffEnv a
   KnownValue (VPAp a _ _) <> KnownValue (VPAp b _ _)
-    | a == b = KnownDesc a
+    | a == b = KnownDesc DiffEnv a
   _ <> _ = Unknown
 
 pattern VCon0 :: ConName -> Value
@@ -140,7 +146,8 @@ instance PP Value where
 instance PP Known where
   pp Unknown = PP.text "Unknown"
   pp (KnownValue v) = pp v
-  pp (KnownDesc (Desc v n _)) = PP.text "<k" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+  pp (KnownDesc SameEnv (Desc v n _)) = PP.text "<k same env " <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+  pp (KnownDesc _ (Desc v n _)) = PP.text "<k" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
 
 -- Utilities not worth an import
 fromMaybe :: a -> Maybe a -> a
@@ -199,6 +206,14 @@ withEnv env = local (\(sp, gl, _) -> (sp, gl, env))
 withClo :: Closure -> EI a -> EI a
 withClo clo = local (\(g,_,_) -> (g, clo, mempty))
 
+withSameEnv :: EI a -> EI a
+withSameEnv = local (\(g, clo, _) -> (g, clo, mempty))
+
+withDiffEnv :: EO a -> EO a
+withDiffEnv = local (\(sp, gl, (env, k)) -> (sp, gl, (diffEnv <$> env, k))) where
+  diffEnv (KnownDesc SameEnv d, k) = (KnownDesc DiffEnv d, k)
+  diffEnv t = t
+
 locally :: EO a -> EO a
 locally = local modGL where
   modGL (sp, Global, (env, _)) = (sp, Local, (env, 0))
@@ -240,8 +255,9 @@ fixEnv a inner = do
   (sp, gl, (env, k)) <- ask
   let vs = runReader a (sp, gl, (env', k'))
       k' = k + length vs
-      env' = M.fromList (zipWith (\(i, (kn, _)) n -> (i,(kn, (gl, n)))) vs [k..]) <> env
-  (kn, inner') <- withEnv (env', k') inner
+      env' = M.fromList (zipWith (\(i, (kn, _)) n -> (i,(sameEnv kn, (gl, n)))) vs [k..]) <> env
+      env'' = M.fromList (zipWith (\(i, (kn, _)) n -> (i,(kn, (gl, n)))) vs [k..]) <> env
+  (kn, inner') <- withEnv (env'', k') inner
   push <- expPush
   pure (kn, do
     vec <- getVecs
@@ -399,10 +415,10 @@ match' (App s (Asc _ p _) as) kn = match' (App s p as) kn
 match' (App s (App _ p ps) as) kn = match' (App s p (ps <> as)) kn
 match' p@(App s (Id _ _ Con con) as) kn = do -- Can't avoid the match now
   let len = length as
-      kns = const Unknown <$> as
+      kns = const Unknown <$> as -- TODO: known con args
   (m, fs) <- matches' as kns
-  let mode AlwaysSucceeds (KnownDesc (Desc con' i _)) | con == con' && i == len = AlwaysSucceeds
-      mode _ (KnownDesc (Desc con' i _)) | con /= con' || i /= len = AlwaysFails
+  let mode AlwaysSucceeds (KnownDesc _ (Desc con' i _)) | con == con' && i == len = AlwaysSucceeds
+      mode _ (KnownDesc _ (Desc con' i _)) | con /= con' || i /= len = AlwaysFails
       mode _ _ = meet MayFail m
   sp <- matchSP
   pure (mode m kn, \case
@@ -429,7 +445,7 @@ isKnownValue (KnownValue _) = True
 isKnownValue _ = False
 
 knownArity :: Known -> Maybe Arity
-knownArity (KnownDesc (Desc _ a _)) = Just a
+knownArity (KnownDesc _ (Desc _ a _)) = Just a
 knownArity (KnownValue (VDesc (Desc _ a _))) = Just a
 knownArity _ = Nothing
 
@@ -456,7 +472,11 @@ applyKnown _ (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ as
     (Unknown, do
       vs <- mapM snd as
       f vs)
-applyKnown s (KnownDesc (Desc i _ (CloFun f))) v as =
+applyKnown _ (KnownDesc SameEnv (Desc _ _ (CloFun f))) _ as =
+  (Unknown, do
+    vs <- mapM snd as
+    withSameEnv $ f vs)
+applyKnown s (KnownDesc _ (Desc i _ (CloFun f))) v as =
   (Unknown, do
     v' <- v
     vs <- mapM snd as
@@ -523,12 +543,12 @@ eval e@(Ops _ _) = expError (span e) (showPp e ++ " residual infix operators.")
 eval (Fn s (_, ds)) = do
   sp <- expSP
   let (a, cs) = mkRhs sp s ds
-  vClo s "<anon>" a cs
+  withDiffEnv $ vClo s "<anon>" a cs
 eval (Tuple _ es) = do
   es' <- traverse eval es
   let d = cDesc "()" (length es')
       kn | null es = KnownValue (VDesc d)
-         | otherwise = KnownDesc d
+         | otherwise = KnownDesc DiffEnv d
   pure (kn, VObj d <$> mapM snd es')
 eval (List _ []) = do
   let v = VCon0 "[]"
@@ -580,12 +600,12 @@ evThings [BTS m] = do
   pure (Unknown, VStruct <$> sequenceA (snd <$> ms))
 evThings (D (BindExp (Asc _ (Id _ _ _ _) _)) : ts@(_:_)) = evThings ts
 evThings [D (BindExp e)] = eval e
-evThings (Fns fs:ts) = fixEnv (traverse clo fs) (evThings ts)
+evThings (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evThings ts)
   where clo (s, v, n, ves) = (v,) <$> vClo s v n ves
 evThings (D (BindExp e) : ts) = do
   (_, e') <- eval e
   (kn, r) <- evThings ts
-  pure (kn, e' *> r)
+  pure (kn, e' >>= \v -> v `seq` r)
 evThings (D (Def p e) : ts) = do
   (ekn, e') <- locally $ eval e
   (kn, m) <- withMatch (span p) (match p ekn) (evThings ts)
@@ -608,7 +628,7 @@ vClo s f n ds = do
       let v = VDesc d
       in (KnownValue v, pure v)
     Local ->
-      (KnownDesc d, (\(_, clo, vec) -> VPAp d (clo <> vec) []) <$> getVecs)
+      (KnownDesc DiffEnv d, (\(_, clo, vec) -> VPAp d (clo <> vec) []) <$> getVecs)
     Closure -> error "gl of Closure isn't a thing."
 
 -- Store arity information about constructors to env
