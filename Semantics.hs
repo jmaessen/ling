@@ -23,10 +23,10 @@ traceSt :: String -> b -> b
 traceSt s b | trace_enabled = trace s b
 traceSt _ e = e
 
-showPp :: (IsAST a) => a -> String
+showPp :: PP a => a -> String
 showPp = show . pp
 
-showsPp :: (IsAST a) => [a] -> String
+showsPp :: PP a => [a] -> String
 showsPp as = show (PP.fsep (pp <$> as))
 
 {-
@@ -73,7 +73,9 @@ instance Eq CloFun where
 instance Show CloFun where
   show _ = "<clofun>"
 
-data Desc = Desc Var Int CloFun
+type Arity = Int
+
+data Desc = Desc Var Arity CloFun
   deriving (Eq, Show)
 
 data Value
@@ -107,7 +109,7 @@ pattern VCon0 c <- VDesc (Desc c 0 _) where
   VCon0 c =
     VDesc (Desc c 0 (CloFun (\_ -> error ("Applying nullary "++ toString c))))
 
-pattern VCon :: ConName -> Int -> [Value] -> Value
+pattern VCon :: ConName -> Arity -> [Value] -> Value
 pattern VCon c n vs <- VObj (Desc c n _) vs where
   VCon c n vs =
     VObj (Desc c n (CloFun (\_ -> error ("Applying already-built "++toString c)))) vs
@@ -117,12 +119,7 @@ toList (VCon0 "[]") = Just []
 toList (VCon "::" 2 [a,as]) = (a:) <$> toList as
 toList _ = Nothing
 
-instance IsAST Value where
-  isValid _ = []
-  span _ = noSpan
-  allSpans _ = []
-  fullParen t = t
-  noParen t = t
+instance PP Value where
   pp (VConst c) = pp (Const noSpan c)
   pp (VCon0 c) = PP.text (toString c)
   pp (VDesc (Desc v n _)) =
@@ -140,12 +137,7 @@ instance IsAST Value where
     PP.vcat [PP.lbrace, PP.text "", PP.nest 2 (PP.vcat $ fmap ppField (M.toList vs)), PP.rbrace]
     where ppField (f, v) = PP.text (toString f) <+> PP.text "=" <+> pp v
 
-instance IsAST Known where
-  isValid _ = []
-  span _ = noSpan
-  allSpans _ = []
-  fullParen t = t
-  noParen t = t
+instance PP Known where
   pp Unknown = PP.text "Unknown"
   pp (KnownValue v) = pp v
   pp (KnownDesc (Desc v n _)) = PP.text "<k" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
@@ -436,27 +428,27 @@ isKnownValue :: Known -> Bool
 isKnownValue (KnownValue _) = True
 isKnownValue _ = False
 
-knownDesc :: Known -> Maybe Desc
-knownDesc (KnownDesc d) = Just d
-knownDesc (KnownValue (VDesc d)) = Just d
-knownDesc _ = Nothing
+knownArity :: Known -> Maybe Arity
+knownArity (KnownDesc (Desc _ a _)) = Just a
+knownArity (KnownValue (VDesc (Desc _ a _))) = Just a
+knownArity _ = Nothing
 
 -- Apply value to args.
 apply :: HasCallStack => String -> (Known, EI Value) -> [(Known, EI Value)] -> (Known, EI Value)
-apply s (kn, f) as = app (knownDesc kn)
+apply s (kn, f) as = app (knownArity kn)
   where
     len = length as
     app Nothing = applyUnknown s f as
-    app (Just d@(Desc _ a _))
-      | a == len = applyKnown s kn d f as
+    app (Just a)
+      | a == len = applyKnown s kn f as
       | a >  len = applyUnknown s f as
       | otherwise = do
           let (bs, cs) = splitAt a as
-          apply s (applyKnown s kn d f bs) cs
+          apply s (applyKnown s kn f bs) cs
 
 applyKnown :: HasCallStack =>
-  String -> Known -> Desc -> EI Value -> [(Known, EI Value)] -> (Known, EI Value)
-applyKnown _ (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ _ as
+  String -> Known -> EI Value -> [(Known, EI Value)] -> (Known, EI Value)
+applyKnown _ (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ as
   | all (isKnownValue . fst) as = do -- Constant fold!
       let r = runReader (f [ v | (KnownValue v, _) <- as]) mempty
       (KnownValue r, pure r)
@@ -464,7 +456,7 @@ applyKnown _ (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ _ as
     (Unknown, do
       vs <- mapM snd as
       f vs)
-applyKnown s _ (Desc i _ (CloFun f)) v as =
+applyKnown s (KnownDesc (Desc i _ (CloFun f))) v as =
   (Unknown, do
     v' <- v
     vs <- mapM snd as
@@ -474,6 +466,7 @@ applyKnown s _ (Desc i _ (CloFun f)) v as =
       VPAp (Desc i' _ _) vec bs
         | i == i' -> withClo vec $ f (bs <> vs)
       _ -> error (s++"applyKnown "++toString i++": bad closure "++showPp v'))
+applyKnown _ kn _ _ = error ("applyKnown non-descy " ++ show kn)
 
 applyUnknown :: HasCallStack =>
   String -> EI Value -> [(Known, EI Value)] -> (Known, EI Value)
@@ -492,7 +485,7 @@ applyInner s v _ = error (s ++ "bad closure "++showPp v)
 
 -- Apply function to args (arities given)
 appWithDesc :: HasCallStack =>
-  String -> Desc -> Stack -> Int -> [Value] -> EI Value
+  String -> Desc -> Stack -> Arity -> [Value] -> EI Value
 appWithDesc s d@(Desc _ n (CloFun f)) vec nv vs
   | n > nv = pure $ VPAp d vec vs
   | n == nv = withClo vec $ f vs
@@ -602,9 +595,10 @@ evThings (D (Def p e) : ts) = do
 evThings (D (Fix _ _ _) : ts) = evThings ts
 evThings (D (Data _ (_,ds)) : ts) = foldr addCon (evThings ts) ds
 evThings (D (Struct _ _) : ts) = evThings ts
-evThings (t:_) = expError (span t) ("unexpected thing "++showPp t)
+evThings (BTS b:_) =
+  expError (foldr1 (<>) (span <$> b)) ("unexpected record, shouldn't happen "++showPp (BTS b))
 
-vClo :: HasCallStack => Span -> Var -> Int -> [([Pat], Exp)] -> EV
+vClo :: HasCallStack => Span -> Var -> Arity -> [([Pat], Exp)] -> EV
 vClo s f n ds = do
   (_, cf) <- locally $ closed $ appDisjs s f ds (replicate n Unknown)
   let d = Desc f n (CloFun cf)
@@ -633,19 +627,19 @@ addCon' (Asc _ (Id _ _ Con c) t) = conBinding c (cCon c (typeArity t))
 addCon' (List _ []) = conBinding "[]" (VCon0 "[]")
 addCon' e = const (expError (span e) ("addCon': not a constructor def "++showPp e))
 
-typeArity :: HasCallStack => Exp -> Int
+typeArity :: HasCallStack => Exp -> Arity
 typeArity (Paren _ t) = typeArity t
 typeArity (Asc _ t _) = typeArity t
 typeArity (Arrow _ _ b) = 1 + typeArity b
 typeArity _ = 0
 
-cDesc :: ConName -> Int -> Desc
+cDesc :: ConName -> Arity -> Desc
 cDesc v i =
   case cCon v i of
     VDesc d -> d
     r -> error ("cDesc: Unexpected value "++showPp r)
 
-cCon :: ConName -> Int -> Value
+cCon :: ConName -> Arity -> Value
 cCon v 0 = VCon0 v
 cCon v i = VDesc d
   where d = Desc v i (CloFun (pure . VObj d))
@@ -656,19 +650,11 @@ toDisj sp (s, d) = spanError s ("Illegal case disjunct "++showPp d) sp
 
 data BlockThing
   = D Def
-  | Fns [(Span, Var, Int, [([Pat], Exp)])]
+  | Fns [(Span, Var, Arity, [([Pat], Exp)])]
   | BTS (Map FieldName Exp)
   deriving (Eq, Show)
 
-instance IsAST BlockThing where
-  isValid _ = []
-  span _ = noSpan
-  allSpans (D d) = allSpans d
-  allSpans (BTS e) = allSpans (M.elems e)
-  allSpans (Fns fs) =
-    fmap (\(s, _, _, _) -> s) fs <> [ s | (_, _, _, ds) <- fs, (ps, e) <- ds, s <- allSpans ps <> allSpans e]
-  fullParen d = d
-  noParen d = d
+instance PP BlockThing where
   pp (D d) = pp d
   pp (BTS m) = pp [(Def (Id noSpan Ident Var f) e) | (f, e) <- M.toList m]
   pp (Fns m) = PP.vcat $ concat [
@@ -710,7 +696,7 @@ groupDef _ (s, Def (App _ (Id _ _ Var f) ps) e) ts =
   Fns [(s, f, length ps, [(ps, e)])] : ts
 groupDef _ (_, d) ts = D d : ts
 
-mkRhs :: HasCallStack => SpanPos -> Span -> [(Span, Def)] -> (Int, [([Exp], Exp)])
+mkRhs :: HasCallStack => SpanPos -> Span -> [(Span, Def)] -> (Arity, [([Exp], Exp)])
 mkRhs sp s0 ds = rhs ds Nothing where
   rhs [] Nothing = spanError s0 "Empty anonymous function." sp
   rhs [] (Just a) = (a, [])
@@ -733,7 +719,7 @@ evalTop (sp, ds) =
 
 -- Definitions of primitives
 
-mkPrim :: (Var, Int, [Value] -> Value) -> (Var, Value)
+mkPrim :: (Var, Arity, [Value] -> Value) -> (Var, Value)
 mkPrim (v, n, f) = (v, VDesc (Desc v n (CloFun $ pure . f)))
 
 vBool :: Bool -> Value
