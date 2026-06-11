@@ -8,8 +8,12 @@ import Data.ByteString(ByteString)
 import Data.ByteString.UTF8(toString, fromString)
 import AST
 import Parse(SpanPos, spanPrefix)
+import Data.List(sortOn)
 import Data.Map(Map)
 import qualified Data.Map as M
+import Data.Set(Set)
+import qualified Data.Set as S
+import GHC.Exts(IsList(..))
 import GHC.Stack(HasCallStack)
 import qualified Text.PrettyPrint as PP
 import Text.PrettyPrint((<+>))
@@ -66,6 +70,7 @@ type Env = (Map Var (Known, Ofs), Int)
 type Stack = BV Value
 type Closure = BV Value
 type Globals = BV Value
+type CloMap = BV Int
 
 type Pat = Exp
 
@@ -123,10 +128,10 @@ pattern VCon c n vs <- VObj (Desc c n _) vs where
   VCon c n vs =
     VObj (Desc c n (CloFun (\_ -> error ("Applying already-built "++toString c)))) vs
 
-toList :: Value -> Maybe [Value]
-toList (VCon0 "[]") = Just []
-toList (VCon "::" 2 [a,as]) = (a:) <$> toList as
-toList _ = Nothing
+toListVal :: Value -> Maybe [Value]
+toListVal (VCon0 "[]") = Just []
+toListVal (VCon "::" 2 [a,as]) = (a:) <$> toListVal as
+toListVal _ = Nothing
 
 instance PP Value where
   pp (VConst c) = pp (Const noSpan c)
@@ -137,7 +142,7 @@ instance PP Value where
     PP.text "<c" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
   pp (VPAp (Desc v _ _) _ vs) = PP.parens (PP.text (toString v) <+> PP.sep (pp <$> vs))
   pp c@(VCon "::" 2 [_,_])
-    | Just cs <- toList c =
+    | Just cs <- toListVal c =
       PP.brackets (PP.fsep $ PP.punctuate (PP.text ",") (pp <$> cs))
   pp (VCon "()" _ vs) =
     PP.parens (PP.hsep $ PP.punctuate (PP.text ",") (pp <$> vs))
@@ -226,15 +231,31 @@ locally = local modGL where
   modGL s = s
 
 -- Convert local env into closure env.
-closed :: EO a -> EO a
-closed = local (\(sp, gl, (env, _)) -> (sp, gl, (closurize env, 0))) where
-  closurize env = do
-    let -- Figure out next available closure slot
-        k0 = 1 + maximum (-1 : [ k | (_, (Closure, k)) <- M.elems env ])
-        -- Assign all locals to closure slots.
-        close (kn, (Local, k)) = (kn, (Closure, k + k0))
-        close e = e
-    close <$> env
+closed :: Set Var -> EO a -> EO (CloMap, a)
+closed vs act = do
+  (sp, gl, (env, _)) <- ask
+  let -- At runtime we're going to append closure and locals and then
+      -- pull vars from them to create a new closure environment
+      -- containing only fv.  Compute a vector mapping slots in the
+      -- new closure to the subset of offsets in this vector we want to keep.
+      -- Find first slot after current closure, where the locals will start.
+      k0 = 1 + maximum (-1 : [ k | (_, (Closure, k)) <- M.elems env ])
+      -- Compute the offsets of the locals.
+      close (Global, _) = []
+      close (Local, k) = [(k0 + k)]
+      close (Closure, k) = [k]
+      tuples = sortOn thd3
+        [ (i, kn, k) | (i, (kn, ofs)) <- M.toAscList env, k <- close ofs, i `S.member` vs]
+      mapping = fromList (thd3 <$> tuples)
+      env' = M.fromList [ (i, (kn, (Closure, k'))) | ((i, kn, _), k') <- zip tuples [0..]]
+      -- Not sure okKnown is actually doing anything here yet.
+      okKnown (KnownValue _) = True
+      okKnown (KnownDesc SameEnv _) = True
+      okKnown _ = False
+      genv = M.filter (\(kn, (glv, _)) -> glv == Global || okKnown kn) env
+      env'' = genv <> env'
+  r <- local (const (sp, gl, (env'', 0))) act
+  pure (mapping, r)
 
 expSP :: EO SpanPos
 expSP = asks (\(sp, _, _) -> sp)
@@ -549,10 +570,10 @@ eval (Const _ c) = pure (KnownValue $ VConst c, pure $ VConst c)
 eval (Wild s) = expError s "_ is a pat, not a valid expr"
 eval e@(Arrow s _ _) = expError s (showPp e ++ " is a type, not a valid expr")
 eval e@(Ops _ _) = expError (span e) (showPp e ++ " residual infix operators.")
-eval (Fn s (_, ds)) = do
+eval e@(Fn s (_, ds)) = do
   sp <- expSP
   let (a, cs) = mkRhs sp s ds
-  withDiffEnv $ vClo s "<anon>" a cs
+  withDiffEnv $ vClo s "<anon>" a (fv e) cs
 eval (Tuple _ es) = do
   es' <- traverse eval es
   let d = cDesc "()" (length es')
@@ -612,12 +633,13 @@ evGroups [Record m] = do
   pure (Unknown, VStruct <$> sequenceA (snd <$> ms))
 evGroups (D (BindExp (Asc _ (Id _ _ _ _) _)) : ts@(_:_)) = evGroups ts
 evGroups [D (BindExp e)] = locally $ eval e
-evGroups (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evGroups ts)
-  where clo (s, v, n, ves) = (v,) <$> vClo s v n ves
+evGroups (Fns fs:ts) = fixEnv (traverse clo fs) (evGroups ts)
+  where clo (s, v, n, ves) = (v,) <$> withDiffEnv (vClo s v n closeOver ves)
+        closeOver = fv (Fns fs)
 evGroups (D (BindExp e) : ts) = do
   (_, e') <- locally $ eval e
   (kn, r) <- evGroups ts
-  pure (kn, e' >>= \v -> v `seq` r)
+  pure (kn, e' >>= \v -> v `seq` r) -- Make sure to demand v in case it's an effect!  Hack!
 evGroups (D (Def p e) : ts) = do
   (ekn, e') <- locally $ eval e
   (kn, m) <- withMatch (span p) (match p ekn) (evGroups ts)
@@ -630,9 +652,12 @@ evGroups (D (Struct _ _) : ts) = evGroups ts
 evGroups (Record b:_) =
   expError (foldr1 (<>) (span <$> b)) ("unexpected record, shouldn't happen "++showPp (Record b))
 
-vClo :: HasCallStack => Span -> Var -> Arity -> [([Pat], Exp)] -> EV
-vClo s f n ds = do
-  (_, cf) <- locally $ closed $ appDisjs s f ds (replicate n Unknown)
+vClo :: HasCallStack => Span -> Var -> Arity -> Set Var -> [([Pat], Exp)] -> EV
+vClo s f n vs ds = do
+  -- The icky thing here is we do the "closed vs" computation for every function
+  -- in a binding group separately, even though the resulting env should be the same
+  -- (since it's based on the passed-in vs).
+  (cloMap, (_, cf)) <- locally $ closed vs $ appDisjs s f ds (replicate n Unknown)
   let d = Desc f n (CloFun cf)
   gl <- expGL
   pure $ case gl of
@@ -640,7 +665,11 @@ vClo s f n ds = do
       let v = VDesc d
       in (KnownValue v, pure v)
     Local ->
-      (KnownDesc DiffEnv d, (\(_, clo, vec) -> VPAp d (clo <> vec) []) <$> getVecs)
+      (KnownDesc DiffEnv d, do
+        (_, clo, vec) <- getVecs
+        let every = clo <> vec
+            clo' = (every!) <$> cloMap
+        pure (VPAp d clo' []))
     Closure -> error "gl of Closure isn't a thing."
 
 -- Store arity information about constructors to env
@@ -716,7 +745,7 @@ i2 _ _ vs = error ("Bad args "++showsPp vs)
 
 valToList :: HasCallStack => Value -> [Value]
 valToList v =
-  case toList v of
+  case toListVal v of
     Just vs -> vs
     _ -> error ("valToList: not a list "++showPp v)
 

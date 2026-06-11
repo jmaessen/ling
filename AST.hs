@@ -143,6 +143,9 @@ instance IsAST t => IsAST [t] where
   noParen ts = noParen <$> ts
   fv ts = foldMap fv ts
 
+instance (PP k, PP v) => PP (Map k v) where
+  pp m = PP.braces $ hsep $ punctuate "," $ fmap (\(k,v) -> pp k <+> text "->" <+> pp v) $ M.toList m
+
 ppOp :: Exp -> Doc -> Exp -> Doc
 ppOp e1 op e2 = hang (pp e1 <+> op) 2 (pp e2)
 
@@ -504,6 +507,35 @@ instance PP DefGroup where
       (ps, e) <- pes ],
     [PP.text "-- End group"]]
 
+instance IsAST DefGroup where
+  isValid (D d) = isValid d
+  isValid (Record m) = concatMap isValid (M.elems m)
+  isValid (Fns gs) =
+    [ err |
+      (_, _, _, ds) <- gs,
+      (as, e) <- ds,
+      err <- concatMap isPat as <> isValid e ]
+  span (D d) = span d
+  span (Record m) = foldl1 (<>) (span <$> M.elems m)
+  span (Fns gs) = foldl1 (<>) [ s | (s, _, _, _) <- gs]
+  allSpans (D d) = allSpans d
+  allSpans (Record m) = concatMap allSpans $ M.elems m
+  allSpans (Fns gs) =
+    [ s | (s0, _, _, ds) <- gs,
+          s <- s0 : [ s1 | (as, e) <- ds, s1 <- allSpans as <> allSpans e]]
+  fullParen (D d) = D (fullParen d)
+  fullParen (Record m) = Record (fullParen <$> m)
+  fullParen (Fns gs) =
+    Fns [ (s, v, a, [(fullParen as, fullParen e) | (as, e) <- ds]) |
+          (s,v,a,ds) <- gs ]
+  noParen (D d) = D (noParen d)
+  noParen (Record m) = Record (noParen <$> m)
+  noParen (Fns gs) =
+    Fns [ (s, v, a, [(noParen as, noParen e) | (as, e) <- ds]) |
+          (s,v,a,ds) <- gs ]
+  fv (Fns fs) = S.unions [ fv e `S.difference` fv ps | (_, _, _, rs) <- fs, (ps, e) <- rs ]
+  fv g = fvGroup g mempty
+
 fvDefs :: Defs -> Set Var
 fvDefs ds =
   case groupDefs ds of
@@ -519,7 +551,7 @@ fvGroup (D (Def pat e)) later = fv e <> (later `S.difference` fv pat)
 fvGroup (D d) later = later <> fv d
 fvGroup (Fns fs) later = (later <> rhs) `S.difference` vs
   where vs = S.fromList [ v | (_, v, _, _) <- fs ]
-        rhs = S.unions [ fv e `S.difference` fv ps | (_, _, _, rs) <- fs, (ps, e) <- rs ]
+        rhs = fv (Fns fs)
 
 groupDefs :: HasCallStack => Defs -> Either ValidErrs [DefGroup]
 groupDefs (_, ds) =
