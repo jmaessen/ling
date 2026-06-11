@@ -1,7 +1,15 @@
 {-# LANGUAGE OverloadedStrings #-}
-module AST where
+module AST(
+  Span(..), noSpan, Mod(Mod), Imports, Var, Id, Import, Defs, FixDir(..),
+  Def(..), OpOrIdent(..), ConOrVar(..), Exp(..), Constant(..),
+  ValidErrs, PP(..), IsAST(..),
+  Arity, DefGroup(..), groupDefs
+) where
 import Data.ByteString(ByteString)
+import Data.Set as S hiding (null, map, foldr)
+import Data.Map as M hiding (null, map, foldr)
 import qualified Data.ByteString.UTF8 as UTF8
+import GHC.Stack(HasCallStack)
 import Prelude hiding (span)
 import Text.Megaparsec(SourcePos)
 import qualified Text.PrettyPrint as PP
@@ -29,7 +37,8 @@ data Mod = Mod SourcePos Defs Imports Defs
 
 type Imports = [Import]
 
-type Id = (Span, ByteString)
+type Var = ByteString
+type Id = (Span, Var)
 
 data Import = Import Span Id Defs
   deriving (Eq, Show)
@@ -108,6 +117,7 @@ class PP t => IsAST t where
   allSpans :: t -> [Span]
   fullParen :: t -> t
   noParen :: t -> t
+  fv :: t -> Set Var
 
 instance PP t => PP (Span, t) where
   pp (_, t) = pp t
@@ -118,6 +128,7 @@ instance IsAST t => IsAST (Span, t) where
   allSpans (s, t) = s : allSpans t
   fullParen (s, t) = (s, fullParen t)
   noParen (s, t) = (s, noParen t)
+  fv (_, t) = fv t
 
 instance PP t => PP [t] where
   pp = vcat . fmap pp
@@ -130,6 +141,7 @@ instance IsAST t => IsAST [t] where
   allSpans = concatMap allSpans
   fullParen ts = fullParen <$> ts
   noParen ts = noParen <$> ts
+  fv ts = foldMap fv ts
 
 ppOp :: Exp -> Doc -> Exp -> Doc
 ppOp e1 op e2 = hang (pp e1 <+> op) 2 (pp e2)
@@ -285,6 +297,25 @@ instance IsAST Exp where
   noParen (Assign s l e) = Assign s (noParen l) (noParen e)
   noParen (Block ds) = Block (noParen ds)
   noParen (OpExp s e) = OpExp s (noParen e)
+  fv (Id _ _ _ v) = S.singleton v
+  fv (App _ e1 es) = fv e1 <> fv es
+  fv (Fn _ ds) = fvDefs ds
+  fv (Asc _ e t) = fv e <> fv t
+  fv (Arrow _ a b) = fv a <> fv b
+  fv (Wild _) = mempty
+  fv (Const _ _) = mempty
+  fv (Ops e ops) = fv e <> foldMap (\(op, e2) -> fv op <> fv e2) ops
+  fv (Case _ e ds) = fv e <> fvDefs ds
+  fv (If _ i t e) = fv i <> fv t <> fv e
+  fv (IfMatch _ p i t e) = fv i <> ((fv t <> fv e) `S.difference` fv p)
+  fv (Dot _ es) = fv es
+  fv (Paren _ e) = fv e
+  fv (Tuple _ es) = foldMap fv es
+  fv (List _ es) = foldMap fv es
+  fv (Do _ p e ds) = fv e <> (fvDefs ds `S.difference` fv p)
+  fv (Assign _ l e) = fv e `S.difference` fv l
+  fv (Block ds) = fvDefs ds
+  fv (OpExp _ e) = fv e
 
 isOppy :: Exp -> ValidErrs
 isOppy (Id _ Op _ _) = []
@@ -367,6 +398,11 @@ instance IsAST Def where
   noParen (Data pat ds) = Data (noParen pat) (noParen ds)
   noParen (Struct pat ds) = Struct (noParen pat) (noParen ds)
   noParen d@(Fix _ _ _) = d
+  fv (BindExp e) = fv e
+  fv (Def pat e) = fv pat <> fv e
+  fv (Data _ _) = mempty
+  fv (Struct _ _) = mempty
+  fv (Fix _ _ _) = mempty
 
 isLHS :: Exp -> ValidErrs
 isLHS (App _ a es) = isLHS a <> concatMap isPat es
@@ -448,3 +484,71 @@ isCase (_, ds) = concatMap isDisjunct ds
 isDisjunct :: (Span, Def) -> ValidErrs
 isDisjunct (_, Def p e) = isPat p <> isValid e
 isDisjunct (s, _) = [(s, "Not a valid case disjunct")]
+
+type Arity = Int
+
+data DefGroup
+  = D Def
+  | Fns [(Span, Var, Arity, [([Exp], Exp)])]
+  | Record (Map Var Exp)
+  deriving (Eq, Show)
+
+instance PP DefGroup where
+  pp (D d) = pp d
+  pp (Record m) = pp [(Def (Id noSpan Ident Var f) e) | (f, e) <- M.toList m]
+  pp (Fns m) = PP.vcat $ concat [
+    [PP.text "-- Group:"],
+    [pp $ Def (App s i ps) e |
+      (s, nm, _, pes) <- m,
+      let i = Id s Ident Var nm,
+      (ps, e) <- pes ],
+    [PP.text "-- End group"]]
+
+fvDefs :: Defs -> Set Var
+fvDefs ds =
+  case groupDefs ds of
+    Left _ -> fv ds
+    Right gs -> foldr fvGroup mempty gs
+
+fvGroup :: DefGroup -> Set Var -> Set Var
+fvGroup (Record r) later = later <> fv (M.elems r)
+fvGroup (D (BindExp (Asc _ (Id _ _ _ i) _))) later = later `S.difference` S.singleton i
+fvGroup (D (BindExp (Paren _ e))) later = fvGroup (D (BindExp e)) later
+fvGroup (D (BindExp (Asc s (Paren _ e) t))) later = fvGroup (D (BindExp (Asc s e t))) later
+fvGroup (D (Def pat e)) later = fv e <> (later `S.difference` fv pat)
+fvGroup (D d) later = later <> fv d
+fvGroup (Fns fs) later = (later <> rhs) `S.difference` vs
+  where vs = S.fromList [ v | (_, v, _, _) <- fs ]
+        rhs = S.unions [ fv e `S.difference` fv ps | (_, _, _, rs) <- fs, (ps, e) <- rs ]
+
+groupDefs :: HasCallStack => Defs -> Either ValidErrs [DefGroup]
+groupDefs (_, ds) =
+  case foldr groupDef (Right []) ds of
+    Right [] -> Right [Record mempty]
+    r -> r
+
+groupDef :: HasCallStack => (Span, Def) -> Either ValidErrs [DefGroup] -> Either ValidErrs [DefGroup]
+groupDef (s, BindExp (Asc s' (Paren _ e) t)) ts =
+  groupDef (s, BindExp (Asc s' e t)) ts
+groupDef (_, a@(BindExp (Asc _ (Id _ _ Var _) _))) (Right (Fns m : bs)) =
+  Right (Fns m : D a : bs)
+groupDef (_, Def (Id _ _ Var var) e) (Right []) = Right [Record (M.singleton var e)]
+groupDef (_, Def (Id _ _ Var var) e) (Right [Record m]) = Right [Record (M.insert var e m)]
+groupDef (s, d) (Right (Record _ : _)) = Left [(s, UTF8.fromString (show (pp d)) <> " is not a struct binding")]
+groupDef (_, d@(BindExp _)) (Right ts) = Right ((D d):ts)
+groupDef (s, Def (Asc _ p _) e) ts = groupDef (s, Def p e) ts
+groupDef (s, Def (App s' (Asc _ p _) ps) e) ts =
+  groupDef (s, Def (App s' p ps) e) ts
+groupDef (s, Def (App s' (App _ p ps) ps') e) ts =
+  groupDef (s, Def (App s' p (ps ++ ps')) e) ts
+groupDef (s, Def (App _ (Id _ _ Var f) ps) e) (Right (Fns ((s', ff, n, pes): fns) : ts))
+  | f == ff =
+    if n /= length ps then
+      Left [(s, ("Arity mismatch in definition of " <> f))]
+    else
+      Right (Fns ((s <> s', ff, n, (ps, e):pes) : fns) : ts)
+  | otherwise = Right (Fns ((s, f, length ps, [(ps, e)]) : (s', ff, n, pes) : fns) : ts)
+groupDef (s, Def (App _ (Id _ _ Var f) ps) e) (Right ts) =
+  Right (Fns [(s, f, length ps, [(ps, e)])] : ts)
+groupDef (_, d) (Right ts) = Right (D d : ts)
+groupDef _ (Left e) = Left e

@@ -56,7 +56,6 @@ empty = V.empty
 
 type ConName = ByteString
 type FieldName = ByteString
-type Var = ByteString
 
 type Ofs = (GL, Int)
 
@@ -78,8 +77,6 @@ instance Eq CloFun where
 
 instance Show CloFun where
   show _ = "<clofun>"
-
-type Arity = Int
 
 data Desc = Desc Var Arity CloFun
   deriving (Eq, Show)
@@ -599,36 +596,39 @@ eval (Block b) = locally (evDefs b)
 eval e = expError (span e) ("eval: Unhandled expression\n  "++showPp e++"\n  "++show e)
 
 evDefs :: Defs -> EV
-evDefs b = do
-  ds <- (`groupDefs` b) <$> expSP
-  evThings ds
+evDefs b =
+  case groupDefs b of
+    Left es -> do
+      sp <- expSP
+      error $ unlines $ (\(s, err) -> spanPrefix s sp <> toString err) <$> es
+    Right ds -> evGroups ds
 
-evThings :: HasCallStack => [BlockThing] -> EV
-evThings [] = do
+evGroups :: HasCallStack => [DefGroup] -> EV
+evGroups [] = do
   let v = VStruct mempty
   pure (KnownValue v, pure v)
-evThings [BTS m] = do
+evGroups [Record m] = do
   ms <- locally $ traverse eval m
   pure (Unknown, VStruct <$> sequenceA (snd <$> ms))
-evThings (D (BindExp (Asc _ (Id _ _ _ _) _)) : ts@(_:_)) = evThings ts
-evThings [D (BindExp e)] = locally $ eval e
-evThings (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evThings ts)
+evGroups (D (BindExp (Asc _ (Id _ _ _ _) _)) : ts@(_:_)) = evGroups ts
+evGroups [D (BindExp e)] = locally $ eval e
+evGroups (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evGroups ts)
   where clo (s, v, n, ves) = (v,) <$> vClo s v n ves
-evThings (D (BindExp e) : ts) = do
+evGroups (D (BindExp e) : ts) = do
   (_, e') <- locally $ eval e
-  (kn, r) <- evThings ts
+  (kn, r) <- evGroups ts
   pure (kn, e' >>= \v -> v `seq` r)
-evThings (D (Def p e) : ts) = do
+evGroups (D (Def p e) : ts) = do
   (ekn, e') <- locally $ eval e
-  (kn, m) <- withMatch (span p) (match p ekn) (evThings ts)
+  (kn, m) <- withMatch (span p) (match p ekn) (evGroups ts)
   pure (kn, do
     v <- e'
     fromMaybeM (error ("Match failure "++showPp p++" = "++showPp v)) (m v))
-evThings (D (Fix _ _ _) : ts) = evThings ts
-evThings (D (Data _ (_,ds)) : ts) = foldr addCon (evThings ts) ds
-evThings (D (Struct _ _) : ts) = evThings ts
-evThings (BTS b:_) =
-  expError (foldr1 (<>) (span <$> b)) ("unexpected record, shouldn't happen "++showPp (BTS b))
+evGroups (D (Fix _ _ _) : ts) = evGroups ts
+evGroups (D (Data _ (_,ds)) : ts) = foldr addCon (evGroups ts) ds
+evGroups (D (Struct _ _) : ts) = evGroups ts
+evGroups (Record b:_) =
+  expError (foldr1 (<>) (span <$> b)) ("unexpected record, shouldn't happen "++showPp (Record b))
 
 vClo :: HasCallStack => Span -> Var -> Arity -> [([Pat], Exp)] -> EV
 vClo s f n ds = do
@@ -679,54 +679,6 @@ cCon v i = VDesc d
 toDisj :: HasCallStack => SpanPos -> (Span, Def) -> ([Pat], Exp)
 toDisj _ (_, Def p e) = ([p], e)
 toDisj sp (s, d) = spanError s ("Illegal case disjunct "++showPp d) sp
-
-data BlockThing
-  = D Def
-  | Fns [(Span, Var, Arity, [([Pat], Exp)])]
-  | BTS (Map FieldName Exp)
-  deriving (Eq, Show)
-
-instance PP BlockThing where
-  pp (D d) = pp d
-  pp (BTS m) = pp [(Def (Id noSpan Ident Var f) e) | (f, e) <- M.toList m]
-  pp (Fns m) = PP.vcat $ concat [
-    [PP.text "-- Group:"],
-    [pp $ Def (App s i ps) e |
-      (s, nm, _, pes) <- m,
-      let i = Id s Ident Var nm,
-      (ps, e) <- pes ],
-    [PP.text "-- End group"]]
-
-groupDefs :: HasCallStack => SpanPos -> Defs -> [BlockThing]
-groupDefs sp (_, ds) =
-  case foldr (groupDef sp) [] ds of
-    [] -> [BTS mempty]
-    ds' -> ds'
-
-groupDef :: HasCallStack => SpanPos -> (Span, Def) -> [BlockThing] -> [BlockThing]
-groupDef sp (s, BindExp (Asc s' (Paren _ e) t)) ts =
-  groupDef sp (s, BindExp (Asc s' e t)) ts
-groupDef _ (_, a@(BindExp (Asc _ (Id _ _ Var _) _))) (Fns m : bs) =
-  Fns m : D a : bs
-groupDef _ (_, Def (Id _ _ Var var) e) [] = [BTS (M.singleton var e)]
-groupDef _ (_, Def (Id _ _ Var var) e) (BTS m:_) = [BTS (M.insert var e m)]
-groupDef sp (s, d) (BTS _ : _) = spanError s (showPp d ++ " is not a struct binding") sp
-groupDef _ (_, d@(BindExp _)) ts = (D d):ts
-groupDef sp (s, Def (Asc _ p _) e) ts = groupDef sp (s, Def p e) ts
-groupDef sp (s, Def (App s' (Asc _ p _) ps) e) ts =
-  groupDef sp (s, Def (App s' p ps) e) ts
-groupDef sp (s, Def (App s' (App _ p ps) ps') e) ts =
-  groupDef sp (s, Def (App s' p (ps ++ ps')) e) ts
-groupDef sp (s, Def (App _ (Id _ _ Var f) ps) e) (Fns ((s', ff, n, pes): fns) : ts)
-  | f == ff =
-    if n /= length ps then
-      spanError s ("Arity mismatch in definition of "++toString f) sp
-    else
-      Fns ((s <> s', ff, n, (ps, e):pes) : fns) : ts
-  | otherwise = Fns ((s, f, length ps, [(ps, e)]) : (s', ff, n, pes) : fns) : ts
-groupDef _ (s, Def (App _ (Id _ _ Var f) ps) e) ts =
-  Fns [(s, f, length ps, [(ps, e)])] : ts
-groupDef _ (_, d) ts = D d : ts
 
 mkRhs :: HasCallStack => SpanPos -> Span -> [(Span, Def)] -> (Arity, [([Exp], Exp)])
 mkRhs sp s0 ds = rhs ds Nothing where
