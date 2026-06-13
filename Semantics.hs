@@ -221,7 +221,7 @@ withNoClo :: EI a -> EI a
 withNoClo = local (\(g, _, _) -> (g, empty, empty))
 
 withDiffEnv :: EO a -> EO a
-withDiffEnv = local (\(sp, gl, (env, k)) -> (sp, gl, (diffEnv <$> env, k))) where
+withDiffEnv = local (\(sp, gl, (env, k)) -> (sp, gl, (diffEnv <$> env, k))) . locally where
   diffEnv (KnownDesc SameEnv d, k) = (KnownDesc DiffEnv d, k)
   diffEnv t = t
 
@@ -481,54 +481,69 @@ knownArity _ = Nothing
 apply :: HasCallStack => String -> (Known, EI Value) -> [(Known, EI Value)] -> (Known, EI Value)
 apply s (kn, f) as = app (knownArity kn)
   where
-    len = length as
-    app Nothing = applyUnknown s f as
-    app (Just a)
-      | a == len = applyKnown s kn f as
-      | a >  len = applyUnknown s f as
-      | otherwise = do
-          let (bs, cs) = splitAt a as
-          apply s (applyKnown s kn f bs) cs
+    as' = map snd as
+    app Nothing = (Unknown, applyUnknown s f as')
+    app (Just a) = applyKnown s a kn f as
 
-applyKnown :: HasCallStack =>
-  String -> Known -> EI Value -> [(Known, EI Value)] -> (Known, EI Value)
-applyKnown _ (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ as
+applyKnown :: HasCallStack => String -> Arity -> Known -> EI Value -> [(Known, EI Value)] -> (Known, EI Value)
+applyKnown s a kn f as
+  | a > len = (Unknown, pApKnown s kn f (map snd as))
+  | a < len = do
+    let (bs, cs) = splitAt a as
+    apply s (applyKnown s a kn f bs) cs
+  where len = length as
+applyKnown _ _ (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ as
   | False && all (isKnownValue . fst) as = do -- Constant fold!
       -- Needs re-thinking: Can't run top level fns in empty global env!
       -- That *only* works with primitives.
       let r = runReader (f [ v | (KnownValue v, _) <- as]) (empty, empty, empty)
       (KnownValue r, pure r)
-  | otherwise =
-    (Unknown, do
-      vs <- mapM snd as
-      withNoClo $ f vs)
-applyKnown _ (KnownDesc SameEnv (Desc _ _ (CloFun f))) _ as =
-  (Unknown, do
-    vs <- mapM snd as
-    withSameClo $ f vs)
-applyKnown s (KnownDesc _ (Desc i _ (CloFun f))) v as =
-  (Unknown, do
-    v' <- v
-    vs <- mapM snd as
-    case v' of
-      VDesc (Desc i' _ _)
-        | i == i' -> local (\(g, _, _) -> (g, empty, empty)) $ f vs
-      VPAp (Desc i' _ _) vec bs
-        | i == i' -> withClo vec $ f (bs <> vs)
-      _ -> error (s++"applyKnown "++toString i++": bad closure "++showPp v'))
-applyKnown _ kn _ _ = error ("applyKnown non-descy " ++ show kn)
+applyKnown s _ kn f as = (Unknown, applyKnown' s kn f (map snd as)) -- Drop known-arg info
+
+applyKnown' :: HasCallStack =>
+  String -> Known -> EI Value -> [EI Value] -> EI Value
+applyKnown' s (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ as = trace (s++" known VDesc") $ do
+  vs <- sequenceA as
+  withNoClo $ f vs
+applyKnown' s (KnownDesc SameEnv (Desc _ _ (CloFun f))) _ as = trace (s++" known SameEnv") $ do
+  vs <- sequenceA as
+  withSameClo $ f vs
+applyKnown' s (KnownDesc _ (Desc i _ (CloFun f))) v as = trace (s++" known DiffEnv") $ do
+  v' <- v
+  vs <- sequenceA as
+  case v' of
+    VPAp (Desc i' _ _) vec bs
+      | i == i' -> withClo vec $ f (bs <> vs)
+    _ -> error (s++"applyKnown "++toString i++": bad closure "++showPp v')
+applyKnown' s kn _ _ = error (s++"applyKnown non-descy " ++ show kn)
+
+pApKnown :: HasCallStack =>
+  String -> Known -> EI Value -> [EI Value] -> EI Value
+pApKnown s (KnownValue (VDesc d)) _ as = trace (s++" pknown VDesc") $ do
+  vs <- sequenceA as
+  pure $ VPAp d mempty vs
+pApKnown s (KnownDesc SameEnv d) _ as = trace (s++" pKnown SameEnv") $ do
+  (_, clo, _) <- ask
+  vs <- sequenceA as
+  pure $ VPAp d clo vs
+pApKnown s (KnownDesc _ d) v as = trace (s++" pKnown DiffEnv") $ do
+  v' <- v
+  vs <- sequenceA as
+  case v' of
+    VPAp _ vec [] -> pure $ VPAp d vec vs
+    _ -> error (s ++ "Unrecognized closure "++showPp v')
+pApKnown s kn _ _ = error (s++"non-closure pApKnown "++showPp kn)
 
 applyUnknown :: HasCallStack =>
-  String -> EI Value -> [(Known, EI Value)] -> (Known, EI Value)
-applyUnknown s f as =
-  (Unknown, do
-    v <- f
-    vs <- mapM snd as
-    applyInner s v vs)
+  String -> EI Value -> [EI Value] -> EI Value
+applyUnknown s f as = do
+  v <- f
+  vs <- sequenceA as
+  applyInner s v vs
 
 applyInner :: HasCallStack => String -> Value -> [Value] -> EI Value
 applyInner s (VDesc d) vs = appWithDesc s d empty (length vs) vs
-applyInner s (VPAp d vec as) bs = do
+applyInner s (VPAp d vec as) bs = trace (s++"Expand pap") $ do
   let vs = as <> bs
   appWithDesc s d vec (length vs) vs
 applyInner s v _ = error (s ++ "bad closure "++showPp v)
@@ -537,16 +552,16 @@ applyInner s v _ = error (s ++ "bad closure "++showPp v)
 appWithDesc :: HasCallStack =>
   String -> Desc -> Stack -> Arity -> [Value] -> EI Value
 appWithDesc s d@(Desc _ n (CloFun f)) vec nv vs
-  | n > nv = pure $ VPAp d vec vs
-  | n == nv = withClo vec $ f vs
-  | otherwise = do
+  | n > nv = trace (s++"PAp") $ pure $ VPAp d vec vs
+  | n == nv = trace (s++"sat") $ withClo vec $ f vs
+  | otherwise = trace (s++"split sat") $ do
       let (vs', vs'') = splitAt n vs
       f' <- withClo vec (f vs')
       applyInner s f' vs''
 
 appDisjs :: HasCallStack => Span -> Var -> [([Pat], Exp)] -> [Known] -> Ef [Value] Value
 appDisjs s f ds knp = do
-  pes <- mapM (\(ps, e) -> withMatch (span ps) (matches ps knp) (locally (eval e))) ds
+  pes <- mapM (\(ps, e) -> withMatch (span ps) (matches ps knp) (eval e)) ds
   let kn = foldr1 (<>) (map fst pes)
       ms = map snd pes
   sp <- expSP
@@ -634,7 +649,7 @@ evGroups [Record m] = do
 evGroups (D (BindExp (Asc _ (Id _ _ _ _) _)) : ts@(_:_)) = evGroups ts
 evGroups [D (BindExp e)] = locally $ eval e
 evGroups (Fns fs:ts) = fixEnv (traverse clo fs) (evGroups ts)
-  where clo (s, v, n, ves) = (v,) <$> withDiffEnv (vClo s v n closeOver ves)
+  where clo (s, v, n, ves) = (v,) <$> (withDiffEnv $ vClo s v n closeOver ves)
         closeOver = fv (Fns fs)
 evGroups (D (BindExp e) : ts) = do
   (_, e') <- locally $ eval e
@@ -657,7 +672,7 @@ vClo s f n vs ds = do
   -- The icky thing here is we do the "closed vs" computation for every function
   -- in a binding group separately, even though the resulting env should be the same
   -- (since it's based on the passed-in vs).
-  (cloMap, (_, cf)) <- locally $ closed vs $ appDisjs s f ds (replicate n Unknown)
+  (cloMap, (_, cf)) <- closed vs $ appDisjs s f ds (replicate n Unknown)
   let d = Desc f n (CloFun cf)
   gl <- expGL
   pure $ case gl of
