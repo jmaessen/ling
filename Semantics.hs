@@ -203,8 +203,8 @@ lookupEnv s i (sp, _, (env, _)) =
     M.lookup i env
 
 mkPush :: GL -> Push
-mkPush Global = \v (g, c, s) -> (vpush g v, c, s)
-mkPush Local = \v (g, c, s) -> (g, c, vpush s v)
+mkPush Global = \v (g, c, s) -> (v `seq` vpush g v, c, s)
+mkPush Local = \v (g, c, s) -> (g, c, v `seq` vpush s v)
 mkPush Closure = error "mkPush Closure isn't a thing."
 
 expPush :: EO Push
@@ -500,10 +500,11 @@ applyKnown s a kn f as
     let (bs, cs) = splitAt a as
     apply s (applyKnown s a kn f bs) cs
   where len = length as
-applyKnown _ _ (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ as
-  | False && all (isKnownValue . fst) as = do -- Constant fold!
+applyKnown _ _ (KnownValue (VDesc (Desc i _ (CloFun f)))) _ as
+  | i == "prim" && all (isKnownValue . fst) as = do -- Constant fold!
       -- Needs re-thinking: Can't run top level fns in empty global env!
       -- That *only* works with primitives.
+      -- Just a hack for "prim" now.
       let r = runReader (f [ v | (KnownValue v, _) <- as]) (empty, empty, empty)
       (KnownValue r, pure r)
 applyKnown s _ kn f as =
