@@ -20,12 +20,19 @@ import Text.PrettyPrint((<+>))
 import Debug.Trace(trace)
 import Prelude hiding (span)
 
-trace_enabled :: Bool
-trace_enabled = False
+trace_match :: Bool
+trace_match = False
 
-traceSt :: String -> b -> b
-traceSt s b | trace_enabled = trace s b
-traceSt _ e = e
+trace_app :: Bool
+trace_app = True
+
+traceM :: (PP a, PP c) => a -> String -> c -> b -> b
+traceM a s c b | trace_match = trace (showPp a++s++showPp c) b
+traceM _ _ _ e = e
+
+traceAp :: String -> String -> b -> b
+traceAp s m b | trace_app = trace (s++m) b
+traceAp _ _ b = b
 
 showPp :: PP a => a -> String
 showPp = show . pp
@@ -221,7 +228,7 @@ withNoClo :: EI a -> EI a
 withNoClo = local (\(g, _, _) -> (g, empty, empty))
 
 withDiffEnv :: EO a -> EO a
-withDiffEnv = local (\(sp, gl, (env, k)) -> (sp, gl, (diffEnv <$> env, k))) . locally where
+withDiffEnv = local (\(sp, gl, (env, k)) -> (sp, gl, (diffEnv <$> env, k))) where
   diffEnv (KnownDesc SameEnv d, k) = (KnownDesc DiffEnv d, k)
   diffEnv t = t
 
@@ -383,9 +390,8 @@ matches ps ks = do
     vec <- get
     case execStateT (ms vs) vec of
       Just vec' ->
-        traceSt
-          (showsPp ps++" match "++showsPp vs)
-          (put vec')
+        traceM ps " match " vs $
+          put vec'
       Nothing -> matchFail)
 
 matches' :: HasCallStack => [Pat] -> [Known] -> M [Value] ()
@@ -406,7 +412,7 @@ match p kn = do
   pure (mode, \val -> do
     vec <- get
     case execStateT (f val) vec of
-      Just vec' -> traceSt (showPp p++" matches "++showPp val) (put vec')
+      Just vec' -> traceM p " matches " val $ put vec'
       Nothing -> matchFail)
 
 match' :: HasCallStack => Pat -> Known -> M Value ()
@@ -482,12 +488,14 @@ apply :: HasCallStack => String -> (Known, EI Value) -> [(Known, EI Value)] -> (
 apply s (kn, f) as = app (knownArity kn)
   where
     as' = map snd as
-    app Nothing = (Unknown, applyUnknown s f as')
+    app Nothing = traceAp s "  apply unknown" $ (Unknown, applyUnknown s f as')
     app (Just a) = applyKnown s a kn f as
 
 applyKnown :: HasCallStack => String -> Arity -> Known -> EI Value -> [(Known, EI Value)] -> (Known, EI Value)
 applyKnown s a kn f as
-  | a > len = (Unknown, pApKnown s kn f (map snd as))
+  | a > len =
+      let apfn = pApKnown s kn f
+      in apfn `seq` (Unknown, apfn =<< args (map snd as))
   | a < len = do
     let (bs, cs) = splitAt a as
     apply s (applyKnown s a kn f bs) cs
@@ -498,52 +506,51 @@ applyKnown _ _ (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ as
       -- That *only* works with primitives.
       let r = runReader (f [ v | (KnownValue v, _) <- as]) (empty, empty, empty)
       (KnownValue r, pure r)
-applyKnown s _ kn f as = (Unknown, applyKnown' s kn f (map snd as)) -- Drop known-arg info
+applyKnown s _ kn f as =
+  let apfn = applyKnown' s kn f
+  in apfn `seq` (Unknown, apfn =<< args (map snd as)) -- Drop known-arg info
+
+args :: [EI Value] -> EI [Value]
+args = foldr (\arg act -> do as' <- act; a <- arg; a `seq` pure (a:as')) (pure [])
 
 applyKnown' :: HasCallStack =>
-  String -> Known -> EI Value -> [EI Value] -> EI Value
-applyKnown' s (KnownValue (VDesc (Desc _ _ (CloFun f)))) _ as = trace (s++" known VDesc") $ do
-  vs <- sequenceA as
-  withNoClo $ f vs
-applyKnown' s (KnownDesc SameEnv (Desc _ _ (CloFun f))) _ as = trace (s++" known SameEnv") $ do
-  vs <- sequenceA as
-  withSameClo $ f vs
-applyKnown' s (KnownDesc _ (Desc i _ (CloFun f))) v as = trace (s++" known DiffEnv") $ do
+  String -> Known -> EI Value -> [Value] -> EI Value
+applyKnown' s (KnownValue (VDesc (Desc nm _ (CloFun f)))) _ = traceAp s (" known VDesc "++toString nm) $ \as -> do
+  withNoClo $ f as
+applyKnown' s (KnownDesc SameEnv (Desc nm _ (CloFun f))) _ = traceAp s (" known SameEnv "++toString nm) $ \as -> do
+  withSameClo $ f as
+applyKnown' s (KnownDesc _ (Desc i _ (CloFun f))) v = traceAp s (" known DiffEnv "++toString i) $ \as -> do
   v' <- v
-  vs <- sequenceA as
   case v' of
     VPAp (Desc i' _ _) vec bs
-      | i == i' -> withClo vec $ f (bs <> vs)
+      | i == i' -> withClo vec $ f (bs <> as)
     _ -> error (s++"applyKnown "++toString i++": bad closure "++showPp v')
-applyKnown' s kn _ _ = error (s++"applyKnown non-descy " ++ show kn)
+applyKnown' s kn _ = error (s++"applyKnown non-descy " ++ show kn)
 
 pApKnown :: HasCallStack =>
-  String -> Known -> EI Value -> [EI Value] -> EI Value
-pApKnown s (KnownValue (VDesc d)) _ as = trace (s++" pknown VDesc") $ do
-  vs <- sequenceA as
-  pure $ VPAp d mempty vs
-pApKnown s (KnownDesc SameEnv d) _ as = trace (s++" pKnown SameEnv") $ do
+  String -> Known -> EI Value -> [Value] -> EI Value
+pApKnown s (KnownValue (VDesc d@(Desc nm _ _))) _ = traceAp s (" pknown VDesc "++toString nm) $ \as -> do
+  pure $ VPAp d mempty as
+pApKnown s (KnownDesc SameEnv d@(Desc nm _ _)) _ = traceAp s (" pKnown SameEnv "++toString nm) $ \as -> do
   (_, clo, _) <- ask
-  vs <- sequenceA as
-  pure $ VPAp d clo vs
-pApKnown s (KnownDesc _ d) v as = trace (s++" pKnown DiffEnv") $ do
+  pure $ VPAp d clo as
+pApKnown s (KnownDesc _ d@(Desc nm _ _)) v = traceAp s (" pKnown DiffEnv "++toString nm) $ \as -> do
   v' <- v
-  vs <- sequenceA as
   case v' of
-    VPAp _ vec [] -> pure $ VPAp d vec vs
+    VPAp _ vec [] -> pure $ VPAp d vec as
     _ -> error (s ++ "Unrecognized closure "++showPp v')
-pApKnown s kn _ _ = error (s++"non-closure pApKnown "++showPp kn)
+pApKnown s kn _ = error (s++"non-closure pApKnown "++showPp kn)
 
 applyUnknown :: HasCallStack =>
   String -> EI Value -> [EI Value] -> EI Value
 applyUnknown s f as = do
+  vs <- args as
   v <- f
-  vs <- sequenceA as
   applyInner s v vs
 
 applyInner :: HasCallStack => String -> Value -> [Value] -> EI Value
 applyInner s (VDesc d) vs = appWithDesc s d empty (length vs) vs
-applyInner s (VPAp d vec as) bs = trace (s++"Expand pap") $ do
+applyInner s (VPAp d@(Desc nm _ _) vec as) bs = traceAp s ("   Expand pap "++toString nm) $ do
   let vs = as <> bs
   appWithDesc s d vec (length vs) vs
 applyInner s v _ = error (s ++ "bad closure "++showPp v)
@@ -551,10 +558,10 @@ applyInner s v _ = error (s ++ "bad closure "++showPp v)
 -- Apply function to args (arities given)
 appWithDesc :: HasCallStack =>
   String -> Desc -> Stack -> Arity -> [Value] -> EI Value
-appWithDesc s d@(Desc _ n (CloFun f)) vec nv vs
-  | n > nv = trace (s++"PAp") $ pure $ VPAp d vec vs
-  | n == nv = trace (s++"sat") $ withClo vec $ f vs
-  | otherwise = trace (s++"split sat") $ do
+appWithDesc s d@(Desc nm n (CloFun f)) vec nv vs
+  | n > nv = traceAp s ("   PAp "++toString nm) $ pure $ VPAp d vec vs
+  | n == nv = traceAp s ("   sat "++toString nm) $ withClo vec $ f vs
+  | otherwise = traceAp s ("   split sat "++toString nm) $ do
       let (vs', vs'') = splitAt n vs
       f' <- withClo vec (f vs')
       applyInner s f' vs''
@@ -588,7 +595,7 @@ eval e@(Ops _ _) = expError (span e) (showPp e ++ " residual infix operators.")
 eval e@(Fn s (_, ds)) = do
   sp <- expSP
   let (a, cs) = mkRhs sp s ds
-  withDiffEnv $ vClo s "<anon>" a (fv e) cs
+  withDiffEnv $ locally $ vClo s "<anon>" a (fv e) cs
 eval (Tuple _ es) = do
   es' <- traverse eval es
   let d = cDesc "()" (length es')
@@ -648,8 +655,8 @@ evGroups [Record m] = do
   pure (Unknown, VStruct <$> sequenceA (snd <$> ms))
 evGroups (D (BindExp (Asc _ (Id _ _ _ _) _)) : ts@(_:_)) = evGroups ts
 evGroups [D (BindExp e)] = locally $ eval e
-evGroups (Fns fs:ts) = fixEnv (traverse clo fs) (evGroups ts)
-  where clo (s, v, n, ves) = (v,) <$> (withDiffEnv $ vClo s v n closeOver ves)
+evGroups (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evGroups ts)
+  where clo (s, v, n, ves) = (v,) <$> (locally $ vClo s v n closeOver ves)
         closeOver = fv (Fns fs)
 evGroups (D (BindExp e) : ts) = do
   (_, e') <- locally $ eval e
