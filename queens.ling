@@ -99,4 +99,4 @@ interShow sh = fn { pre = fn { sep = fn {
   (a::as) r = pre :: sh a (interShow sh sep sep as r)
 }}}
 
-putStr (show (queens 4))
+putStr (show (queens 8))
