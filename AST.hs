@@ -2,7 +2,7 @@
 module AST(
   Span(..), noSpan, Mod(Mod), Imports, Var, Id, Import, Defs, FixDir(..),
   Def(..), OpOrIdent(..), ConOrVar(..), Exp(..), Constant(..),
-  ValidErrs, PP(..), IsAST(..),
+  ValidErrs, PP(..), showPp, showsPp, IsAST(..),
   Arity, DefGroup(..), groupDefs
 ) where
 import Data.ByteString(ByteString)
@@ -110,6 +110,12 @@ class PP t where
 
 instance PP ByteString where
   pp = text
+
+showPp :: PP a => a -> String
+showPp = show . pp
+
+showsPp :: PP a => [a] -> String
+showsPp as = show (PP.fsep (pp <$> as))
 
 class PP t => IsAST t where
   isValid :: t -> ValidErrs

@@ -1,13 +1,14 @@
 {-# LANGUAGE OverloadedStrings, ApplicativeDo, PatternSynonyms, LambdaCase #-}
 module Semantics(evalTop) where
+import AST
+import Parse(SpanPos, spanPrefix)
+
 import Control.Monad
 import Control.Monad.Reader
 import Control.Monad.State
 import qualified Data.BakerVec as V
 import Data.ByteString(ByteString)
 import Data.ByteString.UTF8(toString, fromString)
-import AST
-import Parse(SpanPos, spanPrefix)
 import Data.List(sortOn)
 import Data.Map(Map)
 import qualified Data.Map as M
@@ -40,12 +41,6 @@ traceCAp _ _ _  b = b
 traceAp :: String -> String -> ByteString -> b -> b
 traceAp s m nm b | trace_app = trace (s++m++toString nm) b
 traceAp _ _ _  b = b
-
-showPp :: PP a => a -> String
-showPp = show . pp
-
-showsPp :: PP a => [a] -> String
-showsPp as = show (PP.fsep (pp <$> as))
 
 {-
 -- List model for Vec
@@ -97,7 +92,9 @@ instance Eq CloFun where
 instance Show CloFun where
   show _ = "<clofun>"
 
-data Desc = Desc !Var !Arity CloFun
+data Foldability = NoFold | Fold deriving (Eq, Show)
+
+data Desc = Desc !Var !Arity !Foldability CloFun
   deriving (Eq, Show)
 
 data Value
@@ -133,14 +130,14 @@ instance Semigroup Known where
   _ <> _ = Unknown
 
 pattern VCon0 :: ConName -> Value
-pattern VCon0 c <- VDesc (Desc c 0 _) where
+pattern VCon0 c <- VDesc (Desc c 0 Fold _) where
   VCon0 c =
-    VDesc (Desc c 0 (CloFun (\_ -> error ("Applying nullary "++ toString c))))
+    VDesc (Desc c 0 Fold (CloFun (\_ -> error ("Applying nullary "++ toString c))))
 
 pattern VCon :: ConName -> Arity -> [Value] -> Value
-pattern VCon c n vs <- VObj (Desc c n _) vs where
+pattern VCon c n vs <- VObj (Desc c n Fold _) vs where
   VCon c n vs =
-    VObj (Desc c n (CloFun (\_ -> error ("Applying already-built "++toString c)))) vs
+    VObj (Desc c n Fold (CloFun (\_ -> error ("Applying already-built "++toString c)))) vs
 
 toListVal :: Value -> Maybe [Value]
 toListVal (VCon0 "[]") = Just []
@@ -150,11 +147,13 @@ toListVal _ = Nothing
 instance PP Value where
   pp (VConst c) = pp (Const noSpan c)
   pp (VCon0 c) = PP.text (toString c)
-  pp (VDesc (Desc v n _)) =
+  pp (VDesc (Desc v n Fold _)) =
+    PP.text "<p" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+  pp (VDesc (Desc v n _ _)) =
     PP.text "<d" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
-  pp (VPAp (Desc v n _) _ []) =
+  pp (VPAp (Desc v n _ _) _ []) =
     PP.text "<c" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
-  pp (VPAp (Desc v _ _) _ vs) = PP.parens (PP.text (toString v) <+> PP.sep (pp <$> vs))
+  pp (VPAp (Desc v _ _ _) _ vs) = PP.parens (PP.text (toString v) <+> PP.sep (pp <$> vs))
   pp c@(VCon "::" 2 [_,_])
     | Just cs <- toListVal c =
       PP.brackets (PP.fsep $ PP.punctuate (PP.text ",") (pp <$> cs))
@@ -168,8 +167,10 @@ instance PP Value where
 instance PP Known where
   pp Unknown = PP.text "Unknown"
   pp (KnownValue v) = pp v
-  pp (KnownDesc SameEnv (Desc v n _)) = PP.text "<k same env " <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
-  pp (KnownDesc _ (Desc v n _)) = PP.text "<k" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+  pp (KnownDesc SameEnv (Desc v n _ _)) =
+    PP.text "<k same env " <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+  pp (KnownDesc _ (Desc v n _ _)) =
+    PP.text "<k" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
 
 -- Utilities not worth an import
 fromMaybe :: a -> Maybe a -> a
@@ -458,8 +459,8 @@ match' p@(App s (Id _ _ Con con) as) kn = do -- Can't avoid the match now
   let len = length as
       kns = const Unknown <$> as -- TODO: known con args
   (m, fs) <- matches' as kns
-  let mode AlwaysSucceeds (KnownDesc _ (Desc con' i _)) | con == con' && i == len = AlwaysSucceeds
-      mode _ (KnownDesc _ (Desc con' i _)) | con /= con' || i /= len = AlwaysFails
+  let mode AlwaysSucceeds (KnownDesc _ (Desc con' i _ _)) | con == con' && i == len = AlwaysSucceeds
+      mode _ (KnownDesc _ (Desc con' i _ _)) | con /= con' || i /= len = AlwaysFails
       mode _ _ = meet MayFail m
   sp <- matchSP
   pure (mode m kn, \case
@@ -486,8 +487,8 @@ isKnownValue (KnownValue _) = True
 isKnownValue _ = False
 
 knownArity :: Known -> Maybe Arity
-knownArity (KnownDesc _ (Desc _ a _)) = Just a
-knownArity (KnownValue (VDesc (Desc _ a _))) = Just a
+knownArity (KnownDesc _ (Desc _ a _ _)) = Just a
+knownArity (KnownValue (VDesc (Desc _ a _ _))) = Just a
 knownArity _ = Nothing
 
 -- Apply value to args.
@@ -508,11 +509,8 @@ applyKnown s a kn f as
     let (bs, cs) = splitAt a as
     apply s (applyKnown s a kn f bs) cs
   where len = length as
-applyKnown _ _ (KnownValue (VDesc (Desc i _ (CloFun f)))) _ as
-  | i == "prim" && all (isKnownValue . fst) as = do -- Constant fold!
-      -- Needs re-thinking: Can't run top level fns in empty global env!
-      -- That *only* works with primitives.
-      -- Just a hack for "prim" now.
+applyKnown s _ (KnownValue (VDesc (Desc i _ Fold (CloFun f)))) _ as
+  | all (isKnownValue . fst) as = traceCAp s " constant fold " i $ do -- Constant fold!
       let r = runReader (f [ v | (KnownValue v, _) <- as]) (empty, empty, empty)
       (KnownValue r, pure r)
 applyKnown s _ kn f as =
@@ -525,26 +523,26 @@ args = foldr (\arg act -> do as' <- act; a <- arg; a `seq` pure (a:as')) (pure [
 
 applyKnown' :: HasCallStack =>
   String -> Known -> EI Value -> [Value] -> EI Value
-applyKnown' s (KnownValue (VDesc (Desc nm _ (CloFun f)))) _ = traceCAp s " known VDesc " nm $ \as -> do
+applyKnown' s (KnownValue (VDesc (Desc nm _ _ (CloFun f)))) _ = traceCAp s " known VDesc " nm $ \as -> do
   withNoClo $ f as
-applyKnown' s (KnownDesc SameEnv (Desc nm _ (CloFun f))) _ = traceCAp s " known SameEnv " nm $ \as -> do
+applyKnown' s (KnownDesc SameEnv (Desc nm _ _ (CloFun f))) _ = traceCAp s " known SameEnv " nm $ \as -> do
   withSameClo $ f as
-applyKnown' s (KnownDesc _ (Desc i _ (CloFun f))) v = traceCAp s " known DiffEnv " i $ \as -> do
+applyKnown' s (KnownDesc _ (Desc i _ _ (CloFun f))) v = traceCAp s " known DiffEnv " i $ \as -> do
   v' <- v
   case v' of
-    VPAp (Desc i' _ _) vec bs
+    VPAp (Desc i' _ _ _) vec bs
       | i == i' -> withClo vec $ f (bs <> as)
     _ -> error (s++"applyKnown "++toString i++": bad closure "++showPp v')
 applyKnown' s kn _ = error (s++"applyKnown non-descy " ++ show kn)
 
 pApKnown :: HasCallStack =>
   String -> Known -> EI Value -> [Value] -> EI Value
-pApKnown s (KnownValue (VDesc d@(Desc nm _ _))) _ = traceCAp s " pknown VDesc " nm $ \as -> do
+pApKnown s (KnownValue (VDesc d@(Desc nm _ _ _))) _ = traceCAp s " pknown VDesc " nm $ \as -> do
   pure $ VPAp d mempty as
-pApKnown s (KnownDesc SameEnv d@(Desc nm _ _)) _ = traceCAp s " pKnown SameEnv " nm $ \as -> do
+pApKnown s (KnownDesc SameEnv d@(Desc nm _ _ _)) _ = traceCAp s " pKnown SameEnv " nm $ \as -> do
   (_, clo, _) <- ask
   pure $ VPAp d clo as
-pApKnown s (KnownDesc _ d@(Desc nm _ _)) v = traceCAp s " pKnown DiffEnv " nm $ \as -> do
+pApKnown s (KnownDesc _ d@(Desc nm _ _ _)) v = traceCAp s " pKnown DiffEnv " nm $ \as -> do
   v' <- v
   case v' of
     VPAp _ vec [] -> pure $ VPAp d vec as
@@ -560,7 +558,7 @@ applyUnknown s f as = do
 
 applyInner :: HasCallStack => String -> Value -> [Value] -> EI Value
 applyInner s (VDesc d) vs = appWithDesc s d empty (length vs) vs
-applyInner s (VPAp d@(Desc nm _ _) vec as) bs = traceAp s "   Expand pap " nm $ do
+applyInner s (VPAp d@(Desc nm _ _ _) vec as) bs = traceAp s "   Expand pap " nm $ do
   let vs = as <> bs
   appWithDesc s d vec (length vs) vs
 applyInner s v _ = error (s ++ "bad closure "++showPp v)
@@ -568,7 +566,7 @@ applyInner s v _ = error (s ++ "bad closure "++showPp v)
 -- Apply function to args (arities given)
 appWithDesc :: HasCallStack =>
   String -> Desc -> Stack -> Arity -> [Value] -> EI Value
-appWithDesc s d@(Desc nm n (CloFun f)) vec nv vs
+appWithDesc s d@(Desc nm n _ (CloFun f)) vec nv vs
   | n > nv = traceAp s "   PAp " nm $ pure $ VPAp d vec vs
   | n == nv = traceAp s "   sat " nm $ withClo vec $ f vs
   | otherwise = traceAp s "   split sat " nm $ do
@@ -690,7 +688,7 @@ vClo s f n vs ds = do
   -- in a binding group separately, even though the resulting env should be the same
   -- (since it's based on the passed-in vs).
   (cloMap, (_, cf)) <- closed vs $ locally $ appDisjs s f ds (replicate n Unknown)
-  let d = Desc f n (CloFun cf)
+  let d = Desc f n NoFold (CloFun cf)
   gl <- expGL
   pure $ case gl of
     Global ->
@@ -735,7 +733,7 @@ cDesc v i =
 cCon :: ConName -> Arity -> Value
 cCon v 0 = VCon0 v
 cCon v i = VDesc d
-  where d = Desc v i (CloFun (pure . VObj d))
+  where d = Desc v i Fold (CloFun (pure . VObj d))
 
 toDisj :: HasCallStack => SpanPos -> (Span, Def) -> ([Pat], Exp)
 toDisj _ (_, Def p e) = ([p], e)
@@ -765,7 +763,7 @@ evalTop (sp, ds) =
 -- Definitions of primitives
 
 mkPrim :: (Var, Arity, [Value] -> Value) -> (Var, Value)
-mkPrim (v, n, f) = (v, VDesc (Desc v n (CloFun $ pure . f)))
+mkPrim (v, n, f) = (v, VDesc (Desc v n Fold (CloFun $ pure . f)))
 
 vBool :: Bool -> Value
 vBool True = VCon0 "True"
@@ -796,7 +794,7 @@ valToInt v = error ("valToInt: not an int "++showPp v)
 getPrim :: HasCallStack => [Value] -> Value
 getPrim [n, v] =
   case M.lookup (valToString v) env0 of
-    Just r@(VDesc (Desc _ n' _))
+    Just r@(VDesc (Desc _ n' _ _))
       | fromInteger (valToInt n) == n' -> r
       | otherwise ->
         error ("Arity mismatch on prim "++showPp v++" registered as "++show n'++" asked for "++showPp n)
