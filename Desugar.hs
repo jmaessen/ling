@@ -116,6 +116,8 @@ desugarPat e@(Const _ _) = e
 desugarPat (Dot s es) = Dot s (fmap desugarPat es)
 desugarPat (Paren _ e) = desugarPat e
 desugarPat (Tuple s es) = Tuple s (desugarPat <$> es)
+desugarPat (Tuple s []) = Id s Ident Con "()"
+desugarPat (Tuple s es) = App s (Id s Ident Con "()") es
 desugarPat (List s []) = Id s Ident Con "[]"
 desugarPat (List s (e:es)) =
   App s (Id s Op Con "::") [desugarPat e, desugarPat (List s es)]
@@ -132,6 +134,10 @@ desugarOneFMatch (Def (Asc _ p _) e) =
   desugarOneFMatch (Def p e)
 desugarOneFMatch (Def (Paren s p) e) =
   Def (Paren s (desugarPat p)) (desugarExp e)
+desugarOneFMatch (Def t@(Tuple _ []) e) =
+  Def (desugarPat t) e
+desugarOneFMatch (Def t@(Tuple s _) e) =
+  Def (Paren s (desugarPat t)) e
 desugarOneFMatch (Def (App s p ps) e) =
   Def (App s (desugarPat p) (fmap desugarPat ps)) (desugarExp e)
 desugarOneFMatch d = desugarOneMatch d

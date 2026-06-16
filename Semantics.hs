@@ -1,14 +1,16 @@
-{-# LANGUAGE OverloadedStrings, ApplicativeDo, PatternSynonyms, LambdaCase #-}
+{-# LANGUAGE OverloadedStrings, ApplicativeDo, PatternSynonyms, LambdaCase, TypeFamilies #-}
 module Semantics(evalTop) where
 import AST
 import Parse(SpanPos, spanPrefix)
+import Primitive
+import Value
 
 import Control.Monad
 import Control.Monad.Reader
 import Control.Monad.State
 import qualified Data.BakerVec as V
 import Data.ByteString(ByteString)
-import Data.ByteString.UTF8(toString, fromString)
+import Data.ByteString.UTF8(toString)
 import Data.List(sortOn)
 import Data.Map(Map)
 import qualified Data.Map as M
@@ -25,7 +27,7 @@ trace_match :: Bool
 trace_match = False
 
 trace_app_compile :: Bool
-trace_app_compile = trace_app
+trace_app_compile = True || trace_app
 
 trace_app :: Bool
 trace_app = False
@@ -67,9 +69,6 @@ empty = V.empty
 (!) :: BV a -> Int -> a
 (!) = (V.!)
 
-type ConName = ByteString
-type FieldName = ByteString
-
 type Ofs = (GL, Int)
 
 data GL = Global | Closure | Local
@@ -84,35 +83,14 @@ type CloMap = BV Int
 type Pat = Exp
 
 -- Closures, Descriptors, and Values
-newtype CloFun = CloFun ([Value] -> EI Value)
-
-instance Eq CloFun where
-  _ == _ = True -- Rely on parent to disambiguate.
-
-instance Show CloFun where
-  show _ = "<clofun>"
-
-data Foldability = NoFold | Fold deriving (Eq, Show)
-
-data Desc = Desc !Var !Arity !Foldability CloFun
-  deriving (Eq, Show)
-
-data Value
-  = VConst !Constant
-  | VDesc !Desc
-  | VPAp !Desc !Stack ![Value] -- Also closures
-  | VObj !Desc ![Value]
-  | VStruct !(Map FieldName Value)
-  deriving (Eq, Show)
-
-{-# COMPLETE VConst, VDesc, VPAp, VCon, VStruct #-}
+type Value = Val EI
 
 data SimEnv = SameEnv | DiffEnv deriving (Eq, Show)
 
 data Known
   = Unknown
   | KnownValue Value
-  | KnownDesc SimEnv Desc
+  | KnownDesc SimEnv (Desc EI)
   deriving (Eq, Show)
 
 sameEnv :: Known -> Known
@@ -128,41 +106,6 @@ instance Semigroup Known where
   KnownValue (VPAp a _ _) <> KnownValue (VPAp b _ _)
     | a == b = KnownDesc DiffEnv a
   _ <> _ = Unknown
-
-pattern VCon0 :: ConName -> Value
-pattern VCon0 c <- VDesc (Desc c 0 Fold _) where
-  VCon0 c =
-    VDesc (Desc c 0 Fold (CloFun (\_ -> error ("Applying nullary "++ toString c))))
-
-pattern VCon :: ConName -> Arity -> [Value] -> Value
-pattern VCon c n vs <- VObj (Desc c n Fold _) vs where
-  VCon c n vs =
-    VObj (Desc c n Fold (CloFun (\_ -> error ("Applying already-built "++toString c)))) vs
-
-toListVal :: Value -> Maybe [Value]
-toListVal (VCon0 "[]") = Just []
-toListVal (VCon "::" 2 [a,as]) = (a:) <$> toListVal as
-toListVal _ = Nothing
-
-instance PP Value where
-  pp (VConst c) = pp (Const noSpan c)
-  pp (VCon0 c) = PP.text (toString c)
-  pp (VDesc (Desc v n Fold _)) =
-    PP.text "<p" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
-  pp (VDesc (Desc v n _ _)) =
-    PP.text "<d" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
-  pp (VPAp (Desc v n _ _) _ []) =
-    PP.text "<c" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
-  pp (VPAp (Desc v _ _ _) _ vs) = PP.parens (PP.text (toString v) <+> PP.sep (pp <$> vs))
-  pp c@(VCon "::" 2 [_,_])
-    | Just cs <- toListVal c =
-      PP.brackets (PP.fsep $ PP.punctuate (PP.text ",") (pp <$> cs))
-  pp (VCon "()" _ vs) =
-    PP.parens (PP.hsep $ PP.punctuate (PP.text ",") (pp <$> vs))
-  pp (VCon c _ vs) = PP.parens (PP.text (toString c) <+> PP.sep (pp <$> vs))
-  pp (VStruct vs) =
-    PP.vcat [PP.lbrace, PP.text "", PP.nest 2 (PP.vcat $ fmap ppField (M.toList vs)), PP.rbrace]
-    where ppField (f, v) = PP.text (toString f) <+> PP.text "=" <+> pp v
 
 instance PP Known where
   pp Unknown = PP.text "Unknown"
@@ -195,17 +138,25 @@ spanError s msg sp = error (spanPrefix s sp ++ msg)
 type Outer = (SpanPos, GL, Env)   -- Outer, environment and analysis info.
 type Inner = (Globals, Closure, Stack)  -- Inner, factored value state.
 type EO a = Reader Outer a  -- Outer evaluation monad: compilation.
-type EI a = Reader Inner a -- Inner, actual evaluation.
+newtype EI a = EI (Reader Inner a) -- Inner, actual evaluation.
+  deriving (Functor, Applicative, Monad, MonadReader Inner)
 type Ef b a = EO (Known, b -> EI a) -- Analysis parameterized by input
 type EV = EO (Known, EI Value) -- Analyze and yield a value.
 type Push = Value -> Inner -> Inner
 
+runInner :: EI a -> Inner -> a
+runInner (EI r) = runReader r
+
+instance MonadEval EI where
+  type ClosureState EI = Closure
+  withClo clo = local (\t -> (fst3 t, clo, empty))
+
 bindEnvWith :: ((Known, Ofs) -> (Known, Ofs) -> (Known, Ofs)) ->
-               Var -> Known -> (SpanPos, GL, Env) -> (SpanPos, GL, Env)
+               Var -> Known -> Outer -> Outer
 bindEnvWith c i kn (sp, gl, (env, k)) =
   (sp, gl, (M.insertWith c i (kn, (gl, k)) env, k + 1))
 
-lookupEnv :: HasCallStack => Span -> Var -> (SpanPos, GL, Env) -> (Known, Ofs)
+lookupEnv :: HasCallStack => Span -> Var -> Outer -> (Known, Ofs)
 lookupEnv s i (sp, _, (env, _)) =
   fromMaybe (spanError s ("Unbound variable "++toString i) sp) $
     M.lookup i env
@@ -225,9 +176,6 @@ expGL = (\(_, gl, _) -> gl) <$> ask
 
 withEnv :: Env -> EO a -> EO a
 withEnv env = local (\(sp, gl, _) -> (sp, gl, env))
-
-withClo :: Closure -> EI a -> EI a
-withClo clo = local (\(g,_,_) -> (g, clo, empty))
 
 withSameClo :: EI a -> EI a
 withSameClo = local (\(g, clo, _) -> (g, clo, empty))
@@ -273,7 +221,7 @@ closed vs act = do
   pure (mapping, r)
 
 expSP :: EO SpanPos
-expSP = asks (\(sp, _, _) -> sp)
+expSP = asks fst3
 
 expError :: HasCallStack => Span -> String -> EO a
 expError s msg = spanError s msg <$> expSP
@@ -304,7 +252,7 @@ fixEnv a inner = do
   push <- expPush
   pure (kn, do
     vec <- getVecs
-    let vec' = foldl (\ve (_, (_, f)) -> push (runReader f vec') ve) vec vs
+    let vec' = foldl (\ve (_, (_, f)) -> push (runInner f vec') ve) vec vs
     local (const vec') inner')
 
 -- Handles a *constant* binding (constructor def)
@@ -358,7 +306,7 @@ matchFail :: MI a
 matchFail = lift Nothing
 
 matchSP :: MO SpanPos
-matchSP = gets (\(sp, _, _) -> sp)
+matchSP = gets fst3
 
 matchError :: HasCallStack => Span -> String -> MO a
 matchError s msg = spanError s msg <$> matchSP
@@ -458,7 +406,7 @@ match' p@(App s (Id _ _ Con con) as) kn = do -- Can't avoid the match now
   sp <- matchSP
   pure (mode m kn, \case
     v@(VCon cn n rs)
-      | len /= length rs ->
+      | n /= length rs ->
           spanError s ("Obj ctor arity "++show n++" mismatch "++showPp v) sp
       | len == n && con == cn -> fs rs
       | len /= n && con == cn ->
@@ -502,7 +450,7 @@ applyKnown s a kn f as
   where len = length as
 applyKnown s _ (KnownValue (VDesc (Desc i _ Fold (CloFun f)))) _ as
   | all (isKnownValue . fst) as = traceCAp s " constant fold " i $ do -- Constant fold!
-      let r = runReader (f [ v | (KnownValue v, _) <- as]) (empty, empty, empty)
+      let r = runInner (f [ v | (KnownValue v, _) <- as]) (empty, empty, empty)
       (KnownValue r, pure r)
 applyKnown s _ kn f as =
   let apfn = applyKnown' s kn f
@@ -540,6 +488,7 @@ pApKnown s (KnownDesc _ d@(Desc nm _ _ _)) v = traceCAp s " pKnown DiffEnv " nm 
     _ -> error (s ++ "Unrecognized closure "++showPp v')
 pApKnown s kn _ = error (s++"non-closure pApKnown "++showPp kn)
 
+-- Evaluate function and args
 applyUnknown :: HasCallStack =>
   String -> EI Value -> [EI Value] -> EI Value
 applyUnknown s f as = do
@@ -547,6 +496,7 @@ applyUnknown s f as = do
   v <- f
   applyInner s v vs
 
+-- Unpack closures
 applyInner :: HasCallStack => String -> Value -> [Value] -> EI Value
 applyInner s (VDesc d) vs = appWithDesc s d empty (length vs) vs
 applyInner s (VPAp d@(Desc nm _ _ _) vec as) bs = traceAp s "   Expand pap " nm $ do
@@ -556,7 +506,7 @@ applyInner s v _ = error (s ++ "bad closure "++showPp v)
 
 -- Apply function to args (arities given)
 appWithDesc :: HasCallStack =>
-  String -> Desc -> Stack -> Arity -> [Value] -> EI Value
+  String -> Desc EI -> Stack -> Arity -> [Value] -> EI Value
 appWithDesc s d@(Desc nm n _ (CloFun f)) vec nv vs
   | n > nv = traceAp s "   PAp " nm $ pure $ VPAp d vec vs
   | n == nv = traceAp s "   sat " nm $ withClo vec $ f vs
@@ -585,15 +535,15 @@ eval (App s e es) = do
   pure $ apply sPre e' es'
 eval (Const _ c) = pure (KnownValue $ VConst c, pure $ VConst c)
 eval e@(Fn s (_, ds)) = do
-  sp <- expSP
-  let (a, cs) = mkRhs sp s ds
+  (a, cs) <- mkRhs s ds <$> expSP
   withDiffEnv $ vClo s "<anon>" a (fv e) cs
 eval (Tuple _ es) = do
   es' <- traverse eval es
   let d = cDesc "()" (length es')
       kn | null es = KnownValue (VDesc d)
          | otherwise = KnownDesc DiffEnv d
-  pure (kn, VObj d <$> mapM snd es')
+      vs = fmap snd es'
+  pure (kn, VObj d <$> args vs)
 eval (Case s e (_,es)) = do
   (ekn, e') <- eval e
   sp <- expSP
@@ -617,7 +567,7 @@ evGroups [] = do
   let v = VStruct mempty
   pure (KnownValue v, pure v)
 evGroups (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evGroups ts)
-  where clo (s, v, n, ves) = (v,) <$> vClo s v n closeOver ves
+  where clo (s, v, n, cs) = (v,) <$> vClo s v n closeOver cs
         closeOver = fv (Fns fs)
 evGroups [Record m] = do
   ms <- locally $ traverse eval m
@@ -634,7 +584,6 @@ evGroups (D (Def p e) : ts) = do
     v <- e'
     fromMaybeM (error ("Match failure "++showPp p++" = "++showPp v)) (m v))
 evGroups (D (Data _ (_,ds)) : ts) = foldr addCon (evGroups ts) ds
-evGroups (D (Struct _ _) : ts) = evGroups ts
 evGroups (g : _) = error ("Unexpected group "++showPp g)
 
 vClo :: HasCallStack => Span -> Var -> Arity -> Set Var -> [([Pat], Exp)] -> EV
@@ -668,7 +617,7 @@ typeArity (Asc _ t _) = typeArity t
 typeArity (Arrow _ _ b) = 1 + typeArity b
 typeArity _ = 0
 
-cDesc :: ConName -> Arity -> Desc
+cDesc :: ConName -> Arity -> Desc EI
 cDesc v i = d where
   d = Desc v i Fold (CloFun cf)
   cf | i == 0 = error ("Applying 0-ary "++toString v)
@@ -681,8 +630,8 @@ toDisj :: HasCallStack => SpanPos -> (Span, Def) -> ([Pat], Exp)
 toDisj _ (_, Def p e) = ([p], e)
 toDisj sp (s, d) = spanError s ("Illegal case disjunct "++showPp d) sp
 
-mkRhs :: HasCallStack => SpanPos -> Span -> [(Span, Def)] -> (Arity, [([Exp], Exp)])
-mkRhs sp s0 ds = do
+mkRhs :: HasCallStack => Span -> [(Span, Def)] -> SpanPos -> (Arity, [([Exp], Exp)])
+mkRhs s0 ds sp = do
   let one (_, Def p e) = (patToPats p, e)
       one (_, d) = spanError s0 ("Unexpected disjunct "++showPp d) sp
   case fmap one ds of
@@ -695,48 +644,8 @@ mkRhs sp s0 ds = do
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =
   let (env, vec) = expand env0
-  in runReader (snd $ runReader (evDefs ds) (sp, Global, env)) (vec, empty, empty)
+  in runInner (snd $ runReader (evDefs ds) (sp, Global, env)) (vec, empty, empty)
 
--- Definitions of primitives
-
-mkPrim :: (Var, Arity, [Value] -> Value) -> (Var, Value)
-mkPrim (v, n, f) = (v, VDesc (Desc v n Fold (CloFun $ pure . f)))
-
-vBool :: Bool -> Value
-vBool True = VCon0 "True"
-vBool False = VCon0 "False"
-
-i2 :: HasCallStack => (a -> Value) -> (Integer -> Integer -> a) -> [Value] -> Value
-i2 v op [VConst (EInt a), VConst (EInt b)] = v (a `op` b)
-i2 _ _ vs = error ("Bad args "++showsPp vs)
-
-valToList :: HasCallStack => Value -> [Value]
-valToList v =
-  case toListVal v of
-    Just vs -> vs
-    _ -> error ("valToList: not a list "++showPp v)
-
-valToString :: HasCallStack => Value -> ByteString
-valToString (VConst (EString s)) = s
-valToString v = error ("valToString: not a string "++showPp v)
-
-strConcat :: HasCallStack => [Value] -> Value
-strConcat [v] = VConst (EString (mconcat (valToString <$> valToList v)))
-strConcat vs = error ("strConcat: wrong number of args "++showPp vs)
-
-valToInt :: HasCallStack => Value -> Integer
-valToInt (VConst (EInt i)) = i
-valToInt v = error ("valToInt: not an int "++showPp v)
-
-getPrim :: HasCallStack => [Value] -> Value
-getPrim [n, v] =
-  case M.lookup (valToString v) env0 of
-    Just r@(VDesc (Desc _ n' _ _))
-      | fromInteger (valToInt n) == n' -> r
-      | otherwise ->
-        error ("Arity mismatch on prim "++showPp v++" registered as "++show n'++" asked for "++showPp n)
-    _ -> error ("Bad prim "++showPp v)
-getPrim as = error ("Bad args to prim "++showPp as)
 
 expand :: HasCallStack => Map Var Value -> (Env, BV Value)
 expand e =
@@ -744,25 +653,3 @@ expand e =
            ((M.insert i (KnownValue v, (Global, k)) env, k+1), vpush vec v))
         ((mempty, 0), empty)
         (M.toList e)
-
-env0 :: Map Var Value
-env0 = foldl (\env p -> uncurry M.insert (mkPrim p) env) mempty [
-  ("prim", 2, getPrim),
-  ("intAdd", 2, i2 (VConst . EInt) (+)),
-  ("intSub", 2, i2 (VConst . EInt) (-)),
-  ("intEq", 2, i2 vBool (==)),
-  ("intLE", 2, i2 vBool (<=)),
-  ("strAppend", 2, \case
-      [VConst (EString a), VConst (EString b)] -> VConst (EString (a <> b))
-      vs -> error ("strAppend "++showsPp vs)
-  ),
-  ("putStr", 1, \case
-      [v] -> trace (toString (valToString v)) (VCon0 "()") -- total hack, but "safe"
-      vs -> error ("putStr "++showsPp vs)
-  ),
-  ("strConcat", 1, strConcat),
-  ("intToStr", 1, \case
-      [v] -> VConst $ EString $ fromString $ show $ valToInt v
-      vs -> error ("intToStr "++showsPp vs)
-  )
-  ]

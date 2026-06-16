@@ -69,7 +69,7 @@ queensFromTo 0 vs = [[]]
 queensFromTo c vs = concatMap (addCol (queensFromTo (c - 1))) (removes vs)
 
 addCol : ([Int] -> [[Int]]) -> (Int, [Int]) -> [[Int]]
-addCol qs (i, vs) = concatMap (addCol1 i) (qs vs)
+addCol qs (i, vs) = { concatMap (addCol1 i) (qs vs) }
 
 addCol1 : Int -> [Int] -> [[Int]]
 addCol1 i qs =
