@@ -3,7 +3,7 @@ module AST(
   Span(..), noSpan, Mod(Mod), Imports, Var, Id, Import, Defs, FixDir(..),
   Def(..), OpOrIdent(..), ConOrVar(..), Exp(..), Constant(..),
   ValidErrs, PP(..), showPp, showsPp, IsAST(..),
-  Arity, DefGroup(..), groupDefs
+  Arity, DefGroup(..), groupDefs, patToPats, patsToPat
 ) where
 import Data.ByteString(ByteString)
 import Data.Set as S hiding (null, map, foldr)
@@ -585,6 +585,12 @@ groupDef (s, Def (App _ (Id _ _ Var f) ps) e) (Right (Fns ((s', ff, n, pes): fns
   | otherwise = Right (Fns ((s, f, length ps, [(ps, e)]) : (s', ff, n, pes) : fns) : ts)
 groupDef (s, Def (App _ (Id _ _ Var f) ps) e) (Right ts) =
   Right (Fns [(s, f, length ps, [(ps, e)])] : ts)
+groupDef (s, Def i@(Id _ _ _ _) (Asc _ e _)) ts = groupDef (s, Def i e) ts
+groupDef (s, Def i@(Id _ _ _ _) (Paren _ e)) ts = groupDef (s, Def i e) ts
+groupDef (s, Def (Id _ _ Var f) (Fn _ ds)) (Right (Fns m : bs)) =
+  Right (Fns (fnToGroup s f ds : m) : bs)
+groupDef (s, Def (Id _ _ Var f) (Fn _ ds)) (Right bs) =
+  Right (Fns [fnToGroup s f ds] : bs)
 groupDef (s, BindExp (Asc s' (Paren _ e) t)) ts =
   groupDef (s, BindExp (Asc s' e t)) ts
 groupDef (_, a@(BindExp (Asc _ (Id _ _ Var _) _))) (Right (Fns m : bs)) =
@@ -596,3 +602,22 @@ groupDef (_, d@(BindExp _)) (Right ts) = Right ((D d):ts)
 groupDef (s, Def (Asc _ p _) e) ts = groupDef (s, Def p e) ts
 groupDef (_, d) (Right ts) = Right (D d : ts)
 groupDef _ (Left e) = Left e
+
+fnToGroup :: Span -> Var -> Defs -> (Span, Var, Arity, [([Exp], Exp)])
+fnToGroup s f (_, ds) = (s, f, aty cs, cs) where
+  cs :: [([Exp], Exp)] = map (defToClause . snd) ds
+  aty [] = error "Empty clauses"
+  aty ((ps,_):_) = length ps
+  defToClause (Def p e) = (patToPats p, e)
+  defToClause d = error ("Bad clause " <> showPp d)
+
+patToPats :: Exp -> [Exp]
+patToPats (Asc _ p _) = patToPats p
+patToPats (Paren _ p) = [p]
+patToPats (App _ p ps) = p:ps
+patToPats p = [p]
+
+patsToPat :: [Exp] -> Exp
+patsToPat [] = error "patsToPat []"
+patsToPat [p] = Paren (span p) p
+patsToPat (p:ps) = App (span p <> span ps) p ps

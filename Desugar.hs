@@ -3,7 +3,7 @@ module Desugar where
 import AST
 import Parse
 
-import Data.Map as M
+import Data.Map as M hiding (foldr)
 import Prelude hiding (span)
 
 desugar :: (SpanPos, Defs) -> (SpanPos, Defs)
@@ -17,8 +17,30 @@ desugarDefs ds@(s, ds') =
 
 desugarDef :: (Span, Def) -> [(Span, Def)]
 desugarDef (s, Def i e) = [(s, Def (desugarPat i) (desugarExp e))]
+desugarDef (s, BindExp (Asc s' e t)) = [(s, BindExp (Asc s' (desugarExp e) t))]
 desugarDef (s, BindExp e) = [(s, BindExp (desugarExp e))]
-desugarDef _ = []
+desugarDef (s, Struct e ds) = [(s, Struct e ds)]
+desugarDef (s, Data e (s', ds)) =
+  [(s, Data e (s', fmap (desugarCon e) ds))]
+desugarDef (_, Fix _ _ _) = []
+
+desugarCon :: Exp -> (Span, Def) -> (Span, Def)
+desugarCon t (s, BindExp e) = (s, BindExp $ desugarCon' t e)
+desugarCon _ d = error ("desugarCon: not a constructor def "++showPp d)
+
+desugarCon' :: Exp -> Exp -> Exp
+desugarCon' t (Paren _ e) = desugarCon' t e
+desugarCon' t i@(Id s _ Con _) = Asc s i t
+desugarCon' t (List s []) = Asc s (Id s Ident Con "[]") t
+desugarCon' t (App s (Paren _ e) ts) = desugarCon' t (App s e ts)
+desugarCon' t (App s (App _ e es) ts) = desugarCon' t (App s e (es <> ts))
+desugarCon' t (App s i@(Id _ _ Con _) ts) =
+  Asc s i (foldr (Arrow s) t ts)
+desugarCon' t (Asc s (Paren _ e) t') = desugarCon' t (Asc s e t')
+desugarCon' _ a@(Asc _ (Id _ _ Con _) _) = a
+desugarCon' _ (Asc s (List s' []) t) = Asc s (Id s' Ident Con "[]") t
+desugarCon' _ (Asc _ e t') = desugarCon' t' e
+desugarCon' _ e = error ("not a constructor def "++showPp e)
 
 desugarGroup :: DefGroup -> [(Span, Def)]
 desugarGroup (D d) = desugarDef (span d, d)
@@ -34,12 +56,7 @@ desugarFunc (s, f, _, ps) =
 
 desugarClause :: ([Exp], Exp) -> (Span, Def)
 desugarClause (ps, e) =
-  (span ps <> span e, desugarOneFMatch (Def (toMatch ps) e))
-
-toMatch :: [Exp] -> Exp
-toMatch [] = error "toMatch no args"
-toMatch [p@(App s _ _)] = Paren s p
-toMatch (p:ps) = App (span (p:ps)) p ps
+  (span ps <> span e, desugarOneFMatch (Def (patsToPat ps) e))
 
 -- Expression desugaring.  Full paren and asc eraure.
 -- TODO: decide which Asc survive type checking.

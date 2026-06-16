@@ -12,6 +12,8 @@ data What
   | Show
   | FParen
   | Desugar
+  | DDesugar
+  | GoDesugar
   deriving (Show, Eq)
 
 args :: [String] -> (What, [String])
@@ -20,6 +22,8 @@ args ("--pp" : as) = (Pp, as)
 args ("--show" : as) = (Show, as)
 args ("--paren" : as) = (FParen, as)
 args ("--desugar" : as) = (Desugar, as)
+args ("--double-desugar" : as) = (DDesugar, as)
+args ("--go-desugar" : as) = (GoDesugar, as)
 args (a:as) = (a:) <$> args as
 args [] = (Go, [])
 
@@ -34,3 +38,5 @@ main = do
     Show -> mapM_ (mapM_ print . snd . snd) $ fs
     FParen -> mapM_ (print . pp . fullParen . snd) $ fs
     Desugar -> mapM_ (print .  pp . fullParen . snd . desugar . validate) $ fs
+    DDesugar -> mapM_ (print .  pp . fullParen . snd . desugar . desugar . validate) $ fs
+    GoDesugar -> mapM_ (print . pp . evalTop . desugar . validate) $ fs
