@@ -2,7 +2,7 @@
 module Parse(file, partialFile, toplevel,
              def, defs, block, exp,
              unfix, unfixExp,
-             ppWithSpan, SpanPos, spanPrefix) where
+             ppWithSpan, SpanPos, spanPrefix, validate) where
 import AST
 import Control.Monad
 import Data.ByteString(ByteString)
@@ -427,3 +427,10 @@ unfixOps fs a oes = shunt [] a oes where
     | pS == lp = shunt s (Ops eS [(opS, eTop), (o, e)]) os
     | otherwise = shunt ((eTop, rp, o):(eS, pS, opS):s) e os
     where (lp, rp) = prec o
+
+validate :: (IsAST a) => (SpanPos, a) -> (SpanPos, a)
+validate r@(sp, a) =
+  case isValid a of
+    [] -> r
+    es -> do
+      error (unlines ("Invalid program:" : fmap (\(s, e) -> spanPrefix s sp ++ showPp e) es))

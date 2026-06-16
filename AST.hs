@@ -308,13 +308,13 @@ instance IsAST Exp where
   noParen (OpExp s e) = OpExp s (noParen e)
   fv (Id _ _ _ v) = S.singleton v
   fv (App _ e1 es) = fv e1 <> fv es
-  fv (Fn _ ds) = fvDefs ds
+  fv (Fn _ ds) = fv ds
   fv (Asc _ e t) = fv e <> fv t
   fv (Arrow _ a b) = fv a <> fv b
   fv (Wild _) = mempty
   fv (Const _ _) = mempty
   fv (Ops e ops) = fv e <> foldMap (\(op, e2) -> fv op <> fv e2) ops
-  fv (Case _ e ds) = fv e <> fvDefs ds
+  fv (Case _ e ds) = fv e <> fv ds
   fv (If _ i t e) = fv i <> fv t <> fv e
   fv (IfMatch _ p i t e) = fv i <> ((fv t <> fv e) `S.difference` fv p)
   fv (Dot _ es) = fv es
@@ -389,9 +389,12 @@ instance IsAST Def where
   isValid (Def pat e) = isLHS pat <> isValid e
   isValid (Data pat ds) = isTyCon pat <> isData ds
   isValid (Struct pat ds) = isTyCon pat <> isStruct ds
-  -- isValid (Fun e ds) = isFunDef e <> isValid ds
   isValid (Fix _ _ _) = []
-  span = error "span Def bereft of its span"
+  span (BindExp e) = span e
+  span (Def pat e) = span pat <> span e
+  span (Data pat ds) = span pat <> span ds
+  span (Struct pat ds) = span pat <> span ds
+  span (Fix _ _ (s, _)) = s
   allSpans (BindExp e) = allSpans e
   allSpans (Def p e) = allSpans2 p e
   allSpans (Data p ds) = allSpans2 p ds
@@ -434,6 +437,8 @@ isTyCon (Id _ _ Con _) = []
 isTyCon (App _ a e) = isTyCon a <> concatMap isTyArg e
 isTyCon (Asc _ e t) = isTyCon e <> isTy t
 isTyCon (Paren _ e) = isTyCon e
+isTyCon (List _ []) = []
+isTyCon (List _ [t]) = isTy t
 isTyCon e = [(span e, "Not a valid Type Constructor")]
 
 isTyArg :: Exp -> ValidErrs
@@ -459,6 +464,7 @@ isConDefApp :: Exp -> ValidErrs
 isConDefApp (Id _ _ Con _) = []
 isConDefApp (App _ a e) = isConDefApp a <> concatMap isTy e
 isConDefApp (Paren _ e) = isConDefApp e
+isConDefApp (List _ []) = []
 isConDefApp e = [(span e, "Not a valid constructor name in short constructor def")]
 
 isStruct :: Defs -> ValidErrs
@@ -566,15 +572,6 @@ groupDefs (_, ds) =
     r -> r
 
 groupDef :: HasCallStack => (Span, Def) -> Either ValidErrs [DefGroup] -> Either ValidErrs [DefGroup]
-groupDef (s, BindExp (Asc s' (Paren _ e) t)) ts =
-  groupDef (s, BindExp (Asc s' e t)) ts
-groupDef (_, a@(BindExp (Asc _ (Id _ _ Var _) _))) (Right (Fns m : bs)) =
-  Right (Fns m : D a : bs)
-groupDef (_, Def (Id _ _ Var var) e) (Right []) = Right [Record (M.singleton var e)]
-groupDef (_, Def (Id _ _ Var var) e) (Right [Record m]) = Right [Record (M.insert var e m)]
-groupDef (s, d) (Right (Record _ : _)) = Left [(s, UTF8.fromString (show (pp d)) <> " is not a struct binding")]
-groupDef (_, d@(BindExp _)) (Right ts) = Right ((D d):ts)
-groupDef (s, Def (Asc _ p _) e) ts = groupDef (s, Def p e) ts
 groupDef (s, Def (App s' (Asc _ p _) ps) e) ts =
   groupDef (s, Def (App s' p ps) e) ts
 groupDef (s, Def (App s' (App _ p ps) ps') e) ts =
@@ -588,5 +585,14 @@ groupDef (s, Def (App _ (Id _ _ Var f) ps) e) (Right (Fns ((s', ff, n, pes): fns
   | otherwise = Right (Fns ((s, f, length ps, [(ps, e)]) : (s', ff, n, pes) : fns) : ts)
 groupDef (s, Def (App _ (Id _ _ Var f) ps) e) (Right ts) =
   Right (Fns [(s, f, length ps, [(ps, e)])] : ts)
+groupDef (s, BindExp (Asc s' (Paren _ e) t)) ts =
+  groupDef (s, BindExp (Asc s' e t)) ts
+groupDef (_, a@(BindExp (Asc _ (Id _ _ Var _) _))) (Right (Fns m : bs)) =
+  Right (Fns m : D a : bs)
+groupDef (_, Def (Id _ _ Var var) e) (Right []) = Right [Record (M.singleton var e)]
+groupDef (_, Def (Id _ _ Var var) e) (Right [Record m]) = Right [Record (M.insert var e m)]
+groupDef (s, d) (Right (Record _ : _)) = Left [(s, UTF8.fromString (show (pp d)) <> " is not a struct binding")]
+groupDef (_, d@(BindExp _)) (Right ts) = Right ((D d):ts)
+groupDef (s, Def (Asc _ p _) e) ts = groupDef (s, Def p e) ts
 groupDef (_, d) (Right ts) = Right (D d : ts)
 groupDef _ (Left e) = Left e
