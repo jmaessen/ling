@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module AST(
   Span(..), noSpan, Mod(Mod), Imports, Var, Id, Import, Defs, FixDir(..),
-  Def(..), OpOrIdent(..), ConOrVar(..), Exp(..), Constant(..),
+  Def(..), OpOrIdent(..), ConOrVar(..), Pat(..), Exp(..), Constant(..),
   ValidErrs, PP(..), showPp, showsPp, IsAST(..),
   Arity, DefGroup(..), groupDefs, patToPats, patsToPat
 ) where
@@ -49,7 +49,7 @@ data FixDir = L | R | None deriving (Eq, Show)
 
 data Def
   = BindExp Exp
-  | Def Exp Exp
+  | Def Pat Exp
   | Data Exp Defs
   | Struct Exp Defs
   | Fix FixDir Int Id
@@ -60,6 +60,8 @@ data OpOrIdent = Op | Ident
 
 data ConOrVar = Con | Var
   deriving (Eq, Show)
+
+type Pat = Exp
 
 data Exp
   = Id Span OpOrIdent ConOrVar ByteString
@@ -72,12 +74,12 @@ data Exp
   | Ops Exp [(Exp, Exp)]
   | Case Span Exp Defs
   | If Span Exp Exp Exp
-  | IfMatch Span Exp Exp Exp Exp
+  | IfMatch Span Pat Exp Exp Exp
   | Dot Span [Exp]
   | Paren Span Exp
   | Tuple Span [Exp]
   | List Span [Exp]
-  | Do Span Exp Exp Defs
+  | Do Span Pat Exp Defs
   | Assign Span Exp Exp
   | Block Defs
   | OpExp Span Exp -- `exp`
@@ -504,7 +506,7 @@ type Arity = Int
 
 data DefGroup
   = D Def
-  | Fns [(Span, Var, Arity, [([Exp], Exp)])]
+  | Fns [(Span, Var, Arity, [([Pat], Exp)])]
   | Record (Map Var Exp)
   deriving (Eq, Show)
 
@@ -603,7 +605,7 @@ groupDef (s, Def (Asc _ p _) e) ts = groupDef (s, Def p e) ts
 groupDef (_, d) (Right ts) = Right (D d : ts)
 groupDef _ (Left e) = Left e
 
-fnToGroup :: Span -> Var -> Defs -> (Span, Var, Arity, [([Exp], Exp)])
+fnToGroup :: Span -> Var -> Defs -> (Span, Var, Arity, [([Pat], Exp)])
 fnToGroup s f (_, ds) = (s, f, aty cs, cs) where
   cs :: [([Exp], Exp)] = map (defToClause . snd) ds
   aty [] = error "Empty clauses"
@@ -611,13 +613,13 @@ fnToGroup s f (_, ds) = (s, f, aty cs, cs) where
   defToClause (Def p e) = (patToPats p, e)
   defToClause d = error ("Bad clause " <> showPp d)
 
-patToPats :: Exp -> [Exp]
+patToPats :: Pat -> [Pat]
 patToPats (Asc _ p _) = patToPats p
 patToPats (Paren _ p) = [p]
 patToPats (App _ p ps) = p:ps
 patToPats p = [p]
 
-patsToPat :: [Exp] -> Exp
+patsToPat :: [Pat] -> Pat
 patsToPat [] = error "patsToPat []"
 patsToPat [p] = Paren (span p) p
 patsToPat (p:ps) = App (span p <> span ps) p ps

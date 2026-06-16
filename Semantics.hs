@@ -27,7 +27,7 @@ trace_match :: Bool
 trace_match = False
 
 trace_app_compile :: Bool
-trace_app_compile = True || trace_app
+trace_app_compile = False || trace_app
 
 trace_app :: Bool
 trace_app = False
@@ -79,8 +79,6 @@ type Stack = BV Value
 type Closure = BV Value
 type Globals = BV Value
 type CloMap = BV Int
-
-type Pat = Exp
 
 -- Closures, Descriptors, and Values
 type Value = Val EI

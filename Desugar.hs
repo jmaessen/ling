@@ -115,7 +115,6 @@ desugarPat e@(Wild _) = e
 desugarPat e@(Const _ _) = e
 desugarPat (Dot s es) = Dot s (fmap desugarPat es)
 desugarPat (Paren _ e) = desugarPat e
-desugarPat (Tuple s es) = Tuple s (desugarPat <$> es)
 desugarPat (Tuple s []) = Id s Ident Con "()"
 desugarPat (Tuple s es) = App s (Id s Ident Con "()") es
 desugarPat (List s []) = Id s Ident Con "[]"

@@ -4,10 +4,12 @@ import Desugar
 import GHC.Stack(HasCallStack)
 import Parse
 import Semantics
+-- import qualified SimpleSemantics
 import System.Environment(getArgs)
 
 data What
   = Go
+  -- | Simple
   | Pp
   | Show
   | FParen
@@ -18,6 +20,7 @@ args :: [String] -> (What, [String])
 args ("--go" : as) = (Go, as)
 args ("--pp" : as) = (Pp, as)
 args ("--show" : as) = (Show, as)
+-- args ("--simple" : as) = (Simple, as)
 args ("--paren" : as) = (FParen, as)
 args ("--desugar" : as) = (Desugar, as)
 args (a:as) = (a:) <$> args as
@@ -30,6 +33,7 @@ main = do
   (fs :: [(SpanPos, Defs)]) <- mapM file files
   case what of
     Go -> mapM_ (print . pp . evalTop . desugar . validate) $ fs
+    -- Simple -> MapM_ (print . pp . Simple.evalTop . desugar . validate) $ fs
     Pp -> mapM_ (print . pp . snd) $ fs
     Show -> mapM_ (mapM_ print . snd . snd) $ fs
     FParen -> mapM_ (print . pp . fullParen . snd) $ fs
