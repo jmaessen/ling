@@ -13,15 +13,15 @@ desugarDefs :: Defs -> Defs
 desugarDefs ds@(s, ds') =
   case groupDefs ds of
     Left _ -> (s, concatMap desugarDef ds')
-    Right gs -> (s, concatMap desugarGroup gs)
+    Right gs -> (s, trimSigs $ concatMap desugarGroup gs)
 
 desugarDef :: (Span, Def) -> [(Span, Def)]
 desugarDef (s, Def i e) = [(s, Def (desugarPat i) (desugarExp e))]
 desugarDef (s, BindExp (Asc s' e t)) = [(s, BindExp (Asc s' (desugarExp e) t))]
 desugarDef (s, BindExp e) = [(s, BindExp (desugarExp e))]
-desugarDef (s, Struct e ds) = [(s, Struct e ds)]
 desugarDef (s, Data e (s', ds)) =
   [(s, Data e (s', fmap (desugarCon e) ds))]
+desugarDef (_, Struct _ _) = []
 desugarDef (_, Fix _ _ _) = []
 
 desugarCon :: Exp -> (Span, Def) -> (Span, Def)
@@ -57,6 +57,11 @@ desugarFunc (s, f, _, ps) =
 desugarClause :: ([Exp], Exp) -> (Span, Def)
 desugarClause (ps, e) =
   (span ps <> span e, desugarOneFMatch (Def (patsToPat ps) e))
+
+trimSigs :: [(Span, Def)] -> [(Span, Def)]
+trimSigs ((_, BindExp (Asc _ (Id _ _ _ _) _)) : ds@(_:_)) = trimSigs ds
+trimSigs (d:ds) = d : trimSigs ds
+trimSigs [] = []
 
 -- Expression desugaring.  Full paren and asc eraure.
 -- TODO: decide which Asc survive type checking.

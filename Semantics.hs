@@ -316,7 +316,7 @@ conBinding i v r = do
     (kn, r') <- r
     pure (kn, local (push v) r')
 
--- Match monad
+-- Match monad.  First, static information about a match.
 data Mode = AlwaysSucceeds | MayFail | AlwaysFails deriving (Eq, Show)
 
 -- The join semigroup (disjoint conditions)
@@ -334,7 +334,7 @@ meet AlwaysSucceeds o = o
 meet MayFail AlwaysFails = AlwaysFails
 meet MayFail _ = MayFail
 
-type MO a = State Outer a -- Outer: compute match environment, handle dups
+type MO a = State Outer a -- Outer: compute match environment, flag dup bindings.
 type MI a = StateT Inner Maybe a -- Inner: decide match and bind variables
 type M v a = MO (Mode, v -> MI a) -- Analyze, produce matcher for v yielding a.
 
@@ -425,7 +425,6 @@ match p kn = do
 
 match' :: HasCallStack => Pat -> Known -> M Value ()
 match' (Paren _ p) kn = match p kn
-match' (Asc _ p _) kn = match' p kn
 match' (Wild _) _ = alwaysSucceed
 match' (Id s _ Var var) kn = matched s var kn
 match' (Id _ _ Con con) (KnownValue (VCon0 con'))
@@ -444,17 +443,11 @@ match' (Tuple s []) kn =
   match' (Id s Op Con "()") kn
 match' (Tuple s es) kn =
   match' (App s (Id s Op Con "()") es) kn
-match' (List s []) kn = match' (Id s Op Con "[]") kn
-match' (List s (e:es)) kn =
-  match' (App s (Id s Op Con "::") [e, List s es]) kn
 match' (Block (_, ds)) _ = do
   ms <- map snd <$> mapM matchField ds
   mayFail $ \case
     (VStruct fs) -> mapM_ ($ fs) ms
     _ -> matchFail
-match' (App s (Paren _ p) as) kn = match' (App s p as) kn
-match' (App s (Asc _ p _) as) kn = match' (App s p as) kn
-match' (App s (App _ p ps) as) kn = match' (App s p (ps <> as)) kn
 match' p@(App s (Id _ _ Con con) as) kn = do -- Can't avoid the match now
   let len = length as
       kns = const Unknown <$> as -- TODO: known con args
@@ -475,11 +468,9 @@ match' p@(App s _ _) _ = matchError s ("No constructor at head of pattern "++sho
 match' p _ = matchError (span p) ("Unrecognized pattern "++showPp p)
 
 matchField :: HasCallStack => (Span, Def) -> M (Map FieldName Value) ()
-matchField (s, BindExp p) = matchField (s, Def p p)
 matchField (_, Def (Id _ _ Var fn) p) = do
   (mode, f) <- match' p Unknown
   pure (mode, \fs -> lift (M.lookup fn fs) >>= f)
-matchField (s, Def f _) = matchError s ("Illegal struct binding lhs "++showPp f)
 matchField (s, p) = matchError s ("Illegal struct pattern "++showPp p)
 
 isKnownValue :: Known -> Bool
@@ -586,20 +577,13 @@ appDisjs s f ds knp = do
           oneMatch ms)
 
 eval :: HasCallStack => Exp -> EV
-eval (Paren _ e) = eval e
-eval (Asc _ e _) = eval e
-eval (OpExp _ e) = eval e
 eval (Id s _ _ i) = findEnv s i
-eval a@(App s _ []) = expError s ("Empty apply "++showPp a)
 eval (App s e es) = do
   e' <- eval e
   es' <- mapM eval es -- Effects need to be l -> r
   sPre <- spanPrefix s <$> expSP
   pure $ apply sPre e' es'
 eval (Const _ c) = pure (KnownValue $ VConst c, pure $ VConst c)
-eval (Wild s) = expError s "_ is a pat, not a valid expr"
-eval e@(Arrow s _ _) = expError s (showPp e ++ " is a type, not a valid expr")
-eval e@(Ops _ _) = expError (span e) (showPp e ++ " residual infix operators.")
 eval e@(Fn s (_, ds)) = do
   sp <- expSP
   let (a, cs) = mkRhs sp s ds
@@ -610,10 +594,6 @@ eval (Tuple _ es) = do
       kn | null es = KnownValue (VDesc d)
          | otherwise = KnownDesc DiffEnv d
   pure (kn, VObj d <$> mapM snd es')
-eval (List _ []) = do
-  let v = VCon0 "[]"
-  pure (KnownValue v, pure v)
-eval (List s (e:es)) = eval (App s (Id s Op Con "::") [e, List s es])
 eval (Case s e (_,es)) = do
   (ekn, e') <- eval e
   sp <- expSP
@@ -621,28 +601,6 @@ eval (Case s e (_,es)) = do
   pure (kn, do
     v <- e'
     m [v])
-eval (If _ c t e) = do
-  (ckn, c') <- eval c
-  case ckn of
-    KnownValue (VCon0 "True") -> eval t
-    KnownValue (VCon0 "False") -> eval e
-    Unknown -> do
-      (tkn, t') <- eval t
-      (ekn, e') <- eval e
-      sp <- expSP
-      pure (tkn <> ekn, do
-        c' >>= \case
-          VCon0 "True" -> t'
-          VCon0 "False" -> e'
-          v -> spanError (span c) ("If non-boolean "++showPp v) sp)
-    _ -> expError (span c) ("If statically non-boolean "++showPp ckn)
-eval (IfMatch _ p c t e) = do
-  (ckn, c') <- eval c
-  (tkn, tm) <- locally $ withMatch (span p) (match p ckn) (eval t)
-  (ekn, e') <- eval e
-  pure (tkn <> ekn, do
-    v <- c'
-    fromMaybeM e' (tm v))
 eval (Block b) = locally (evDefs b)
 eval e = expError (span e) ("eval: Unhandled expression\n  "++showPp e++"\n  "++show e)
 
@@ -658,14 +616,13 @@ evGroups :: HasCallStack => [DefGroup] -> EV
 evGroups [] = do
   let v = VStruct mempty
   pure (KnownValue v, pure v)
-evGroups [Record m] = do
-  ms <- locally $ traverse eval m
-  pure (Unknown, VStruct <$> sequenceA (snd <$> ms))
-evGroups (D (BindExp (Asc _ (Id _ _ _ _) _)) : ts@(_:_)) = evGroups ts
-evGroups [D (BindExp e)] = locally $ eval e
 evGroups (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evGroups ts)
   where clo (s, v, n, ves) = (v,) <$> vClo s v n closeOver ves
         closeOver = fv (Fns fs)
+evGroups [Record m] = do
+  ms <- locally $ traverse eval m
+  pure (Unknown, VStruct <$> sequenceA (snd <$> ms))
+evGroups [D (BindExp e)] = locally $ eval e
 evGroups (D (BindExp e) : ts) = do
   (_, e') <- locally $ eval e
   (kn, r) <- evGroups ts
@@ -676,11 +633,9 @@ evGroups (D (Def p e) : ts) = do
   pure (kn, do
     v <- e'
     fromMaybeM (error ("Match failure "++showPp p++" = "++showPp v)) (m v))
-evGroups (D (Fix _ _ _) : ts) = evGroups ts
 evGroups (D (Data _ (_,ds)) : ts) = foldr addCon (evGroups ts) ds
 evGroups (D (Struct _ _) : ts) = evGroups ts
-evGroups (Record b:_) =
-  expError (foldr1 (<>) (span <$> b)) ("unexpected record, shouldn't happen "++showPp (Record b))
+evGroups (g : _) = error ("Unexpected group "++showPp g)
 
 vClo :: HasCallStack => Span -> Var -> Arity -> Set Var -> [([Pat], Exp)] -> EV
 vClo s f n vs ds = do
@@ -704,19 +659,8 @@ vClo s f n vs ds = do
 
 -- Store arity information about constructors to env
 addCon :: HasCallStack => (Span, Def) -> EV -> EV
-addCon (_, BindExp e) = addCon' e
+addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) = conBinding c (cCon c (typeArity t))
 addCon (s, d) = const (expError s ("addCon: not a constructor def "++showPp d))
-
-addCon' :: HasCallStack => Exp -> EV -> EV
-addCon' (Paren _ e) = addCon' e
-addCon' (Id _ _ Con c) = conBinding c (VCon0 c)
-addCon' (App s (Paren _ e) as) = addCon' (App s e as)
-addCon' (App s (App _ e as) as') = addCon' (App s e (as <> as'))
-addCon' (App _ (Id _ _ Con c) as) = conBinding c (cCon c (length as))
-addCon' (Asc s (Paren _ e) t) = addCon' (Asc s e t)
-addCon' (Asc _ (Id _ _ Con c) t) = conBinding c (cCon c (typeArity t))
-addCon' (List _ []) = conBinding "[]" (VCon0 "[]")
-addCon' e = const (expError (span e) ("addCon': not a constructor def "++showPp e))
 
 typeArity :: HasCallStack => Exp -> Arity
 typeArity (Paren _ t) = typeArity t
@@ -725,35 +669,28 @@ typeArity (Arrow _ _ b) = 1 + typeArity b
 typeArity _ = 0
 
 cDesc :: ConName -> Arity -> Desc
-cDesc v i =
-  case cCon v i of
-    VDesc d -> d
-    r -> error ("cDesc: Unexpected value "++showPp r)
+cDesc v i = d where
+  d = Desc v i Fold (CloFun cf)
+  cf | i == 0 = error ("Applying 0-ary "++toString v)
+     | otherwise = pure . VObj d
 
 cCon :: ConName -> Arity -> Value
-cCon v 0 = VCon0 v
-cCon v i = VDesc d
-  where d = Desc v i Fold (CloFun (pure . VObj d))
+cCon v i = VDesc (cDesc v i)
 
 toDisj :: HasCallStack => SpanPos -> (Span, Def) -> ([Pat], Exp)
 toDisj _ (_, Def p e) = ([p], e)
 toDisj sp (s, d) = spanError s ("Illegal case disjunct "++showPp d) sp
 
 mkRhs :: HasCallStack => SpanPos -> Span -> [(Span, Def)] -> (Arity, [([Exp], Exp)])
-mkRhs sp s0 ds = rhs ds Nothing where
-  rhs [] Nothing = spanError s0 "Empty anonymous function." sp
-  rhs [] (Just a) = (a, [])
-  rhs ((s, Def (App _ p ps) e) : ds') ma
-    | a' /= a =
-      spanError s ("arity "++show (length ps + 1)++
-                   " doesn't match prior clause "++ show a) sp
-    | otherwise =
-      (a, ((p:ps), e) : snd (rhs ds' (Just a)))
-    where a' = 1 + length ps
-          a = fromMaybe a' ma
-  rhs ((s, Def (Asc _ p _) e) : ds') a = rhs ((s, Def p e) : ds') a
-  rhs ((s, Def p e) : ds') a = rhs ((s, Def (App s p []) e) : ds') a
-  rhs ((s, _) : _) _ = spanError s ("invalid function clause.") sp
+mkRhs sp s0 ds = do
+  let one (_, Def p e) = (patToPats p, e)
+      one (_, d) = spanError s0 ("Unexpected disjunct "++showPp d) sp
+  case fmap one ds of
+    [] -> spanError s0 "Empty anonymous function." sp
+    c:cs
+      | all ((==a) . length . fst) cs -> (a, c:cs)
+      | otherwise -> spanError s0 ("Inconsistent arities, expect "++show a) sp
+      where a = length . fst $ c
 
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =
