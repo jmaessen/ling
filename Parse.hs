@@ -3,7 +3,9 @@ module Parse(file, partialFile, toplevel,
              def, defs, block, exp,
              unfix, unfixExp,
              ppWithSpan, spanError,
-             spanPos, SpanPos, spanPrefix, validate) where
+             spanPos, SpanPos, spanPrefix, validate,
+             isIdCont
+            ) where
 import AST
 import Control.Monad
 import Data.ByteString(ByteString)
@@ -257,7 +259,7 @@ expParens =
 app :: [Exp] -> Exp
 app [e] = e
 app (e:es) = App (span e <> span (last es)) e es
-app [] = error ("app []")
+app [] = error "app []"
 
 ops :: Exp -> [(Exp, Exp)] -> Exp
 ops e [] = e

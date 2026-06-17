@@ -107,12 +107,12 @@ instance Semigroup Known where
   _ <> _ = Unknown
 
 instance PP Known where
-  pp Unknown = PP.text "Unknown"
+  pp Unknown = "Unknown"
   pp (KnownValue v) = pp v
   pp (KnownDesc SameEnv (Desc v n _ _)) =
-    PP.text "<k same env " <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+    "<k same env " <+> PP.text (toString v) <+> (PP.int n <> ">")
   pp (KnownDesc _ (Desc v n _ _)) =
-    PP.text "<k" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+    "<k" <+> PP.text (toString v) <+> (PP.int n <> ">")
 
 -- Utilities not worth an import
 fromMaybe :: a -> Maybe a -> a
@@ -325,9 +325,9 @@ withMatch s m t = do
     pure (kn, \v -> do
       vec <- getVecs
       case execStateT (f v) vec of
-        Just _ | mode == AlwaysFails -> spanError s ("AlwaysFails succeeded!") sp
+        Just _ | mode == AlwaysFails -> spanError s "AlwaysFails succeeded!" sp
         Just vec' -> Just <$> local (const vec') t'
-        Nothing | mode == AlwaysSucceeds -> spanError s ("AlwaysSucceeds failed!") sp
+        Nothing | mode == AlwaysSucceeds -> spanError s "AlwaysSucceeds failed!" sp
         Nothing -> pure Nothing)
 
 -- Assumes length ps == length vs

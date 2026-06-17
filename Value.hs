@@ -65,18 +65,18 @@ instance PP (Val m) where
   pp (VConst c) = pp (Const noSpan c)
   pp (VCon0 c) = PP.text (toString c)
   pp (VDesc (Desc v n Fold _)) =
-    PP.text "<p" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+    "<p" <+> PP.text (toString v) <+> (PP.int n <> ">")
   pp (VDesc (Desc v n _ _)) =
-    PP.text "<d" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+    "<d" <+> PP.text (toString v) <+> (PP.int n <> ">")
   pp (VPAp (Desc v n _ _) _ []) =
-    PP.text "<c" <+> PP.text (toString v) <+> (PP.int n <> PP.text ">")
+    "<c" <+> PP.text (toString v) <+> (PP.int n <> ">")
   pp (VPAp (Desc v _ _ _) _ vs) = PP.parens (PP.text (toString v) <+> PP.sep (pp <$> vs))
   pp c@(VCon "::" 2 [_,_])
     | Just cs <- toListVal c =
-      PP.brackets (PP.fsep $ PP.punctuate (PP.text ",") (pp <$> cs))
+      PP.brackets (PP.fsep $ PP.punctuate "," (pp <$> cs))
   pp (VCon "()" _ vs) =
-    PP.parens (PP.hsep $ PP.punctuate (PP.text ",") (pp <$> vs))
+    PP.parens (PP.hsep $ PP.punctuate "," (pp <$> vs))
   pp (VCon c _ vs) = PP.parens (PP.text (toString c) <+> PP.sep (pp <$> vs))
   pp (VStruct vs) =
-    PP.vcat [PP.lbrace, PP.text "", PP.nest 2 (PP.vcat $ fmap ppField (toList vs)), PP.rbrace]
-    where ppField (f, v) = PP.text (toString f) <+> PP.text "=" <+> pp v
+    PP.vcat [PP.lbrace, "", PP.nest 2 (PP.vcat $ fmap ppField (toList vs)), PP.rbrace]
+    where ppField (f, v) = PP.text (toString f) <+> "=" <+> pp v

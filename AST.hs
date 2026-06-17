@@ -16,8 +16,10 @@ import Prelude hiding (span)
 import Text.Megaparsec(SourcePos)
 import qualified Text.PrettyPrint as PP
 import Text.PrettyPrint(
-  Doc, (<+>), lbrace, rbrace, brackets, double, hang, hcat, hsep, sep,
-  int, integer, nest, parens, punctuate, vcat)
+  Doc, (<+>), braces, lbrace, rbrace,
+  brackets, double, hang,
+  fsep, int, integer, hcat, hsep, sep, text,
+  nest, parens, punctuate, vcat)
 
 noSpan :: Span
 noSpan = S 0 0
@@ -113,13 +115,13 @@ class PP t where
   pp :: t -> Doc
 
 instance PP ByteString where
-  pp = text
+  pp = text . toString
 
 showPp :: PP a => a -> String
 showPp = show . pp
 
 showsPp :: PP a => [a] -> String
-showsPp as = show (PP.fsep (pp <$> as))
+showsPp as = show (fsep (pp <$> as))
 
 class PP t => IsAST t where
   isValid :: t -> ValidErrs
@@ -154,18 +156,15 @@ instance IsAST t => IsAST [t] where
   fv ts = foldMap fv ts
 
 instance (PP k, PP v) => PP (Map k v) where
-  pp m = PP.braces $ hsep $ punctuate "," $ fmap (\(k,v) -> pp k <+> text "->" <+> pp v) $ M.toList m
+  pp m = braces $ hsep $ punctuate "," $ fmap (\(k,v) -> pp k <+> "->" <+> pp v) $ M.toList m
 
 ppOp :: Exp -> Doc -> Exp -> Doc
 ppOp e1 op e2 = hang (pp e1 <+> op) 2 (pp e2)
 
-text :: ByteString -> Doc
-text = PP.text . toString
-
 ppBlock :: Doc -> Defs -> Doc
-ppBlock lhs (_, []) = lhs <+> text "{}"
+ppBlock lhs (_, []) = lhs <+> "{}"
 ppBlock lhs (_, [d]) = hsep [lhs, lbrace, nest 2 (pp d), rbrace]
-ppBlock lhs (_, ds) = vcat [lhs <+> lbrace, text "", nest 2 (pp ds), rbrace]
+ppBlock lhs (_, ds) = vcat [lhs <+> lbrace, "", nest 2 (pp ds), rbrace]
 
 ppDef :: Doc -> Doc -> Exp -> Doc
 ppDef lhs eq (Block ds) = ppBlock (lhs <+> eq) ds
@@ -175,37 +174,37 @@ allSpans2 :: (IsAST a, IsAST b) => a -> b -> [Span]
 allSpans2 a b = allSpans a <> allSpans b
 
 instance PP Exp where
-  pp (Id _ Ident _ e) = text e
-  pp (Id _ Op _ o) = parens (text o)
+  pp (Id _ Ident _ e) = pp e
+  pp (Id _ Op _ o) = parens (pp o)
   pp (App _ o [a, b]) | null $ isOppy o = pp a <+> ppOppy o <+> pp b
   pp (App _ e1 e2) = pp e1 <+> sep (pp <$> e2)
-  pp (Fn _ body) = ppBlock (text "fn") body
-  pp (Asc _ e t) = ppOp e (text ":") t
-  pp (Arrow _ a b) = ppOp a (text "->") b
-  pp (Wild _) = text "_"
+  pp (Fn _ body) = ppBlock "fn" body
+  pp (Asc _ e t) = ppOp e ":" t
+  pp (Arrow _ a b) = ppOp a "->" b
+  pp (Wild _) = "_"
   pp (Const _ (EInt i)) = integer i
   pp (Const _ (EFloat d)) = double d
   pp (Const _ (EChar c)) = PP.text (show c)
   pp (Const _ (EString s)) = PP.text (show s)
   pp (Ops e []) = pp e
   pp (Ops e ((o, e2) : es)) = ppOp e (ppOppy o) (Ops e2 es)
-  pp (Case _ e ds) = ppDef (text "case") (pp e) (Block ds)
+  pp (Case _ e ds) = ppDef "case" (pp e) (Block ds)
   pp (If _ i t e) =
-    vcat [text "if" <+> pp i,
-          hang (text "then") 2 (pp t), hang (text "else") 2 (pp e)]
+    vcat ["if" <+> pp i,
+          hang "then" 2 (pp t), hang "else" 2 (pp e)]
   pp (IfMatch _ p i t e) =
-    vcat [text "if" <+> hang (pp p <+> text "=") 4 (pp i),
-          hang (text "then") 2 (pp t), hang (text "else") 2 (pp e)]
-  pp (Dot _ (e:es)) = pp e <> hcat ((text "." <>) . pp <$> es)
+    vcat ["if" <+> hang (pp p <+> "=") 4 (pp i),
+          hang "then" 2 (pp t), hang "else" 2 (pp e)]
+  pp (Dot _ (e:es)) = pp e <> hcat (("." <>) . pp <$> es)
   pp (Dot _ []) = PP.empty
   pp (Paren _ e) = parens (pp e)
-  pp (Tuple _ es) = parens (hsep $ punctuate (text ",") (pp <$> es))
-  pp (List _ es) = brackets (hsep $ punctuate (text ",") (pp <$> es))
+  pp (Tuple _ es) = parens (hsep $ punctuate "," (pp <$> es))
+  pp (List _ es) = brackets (hsep $ punctuate "," (pp <$> es))
   pp (Do _ p e ds) =
-    ppDef (text "do") (hang (pp p <+> text "<-") 4 (pp e)) (Block ds)
-  pp (Assign _ l e) = ppOp l (text ":=") e
+    ppDef "do" (hang (pp p <+> "<-") 4 (pp e)) (Block ds)
+  pp (Assign _ l e) = ppOp l ":=" e
   pp (Block ds) = ppBlock mempty ds
-  pp (OpExp _ e) = hcat [text "`", pp e, text "`"]
+  pp (OpExp _ e) = hcat ["`", pp e, "`"]
 
 instance IsAST Exp where
   isValid (Id _ _ _ _) = []
@@ -350,7 +349,7 @@ isOppy (OpExp _ e) = isValid e
 isOppy e = [(span e, "Not a valid operator")]
 
 ppOppy :: Exp -> Doc
-ppOppy (Id _ Op _ o) = text o
+ppOppy (Id _ Op _ o) = pp o
 ppOppy e@(OpExp _ _) = pp e
 ppOppy (Paren _ e) = ppOppy e
 ppOppy e = pp (OpExp (span e) e)
@@ -395,12 +394,12 @@ isFieldBind (s, _) = [(s, "Not a valid field pattern")]
 
 instance PP Def where
   pp (BindExp e) = pp e
-  pp (Def pat e) = ppDef (pp pat) (text "=") e
-  pp (Data pat ds) = ppDef (pp pat) (text "= data") (Block ds)
-  pp (Struct pat ds) = ppDef (pp pat) (text "= struct") (Block ds)
-  pp (Fix L i (_, o)) = text "infixl" <+> int i <+> text o
-  pp (Fix R i (_, o)) = text "infixr" <+> int i <+> text o
-  pp (Fix None i (_, o)) = text "infix" <+> int i <+> text o
+  pp (Def pat e) = ppDef (pp pat) "=" e
+  pp (Data pat ds) = ppDef (pp pat) "= data" (Block ds)
+  pp (Struct pat ds) = ppDef (pp pat) "= struct" (Block ds)
+  pp (Fix L i (_, o)) = "infixl" <+> int i <+> pp o
+  pp (Fix R i (_, o)) = "infixr" <+> int i <+> pp o
+  pp (Fix None i (_, o)) = "infix" <+> int i <+> pp o
 
 instance IsAST Def where
   isValid (BindExp e) = isValid e
@@ -531,12 +530,12 @@ instance PP DefGroup where
   pp (D d) = pp d
   pp (Record m) = pp [(Def (Id noSpan Ident Var f) e) | (f, e) <- M.toList m]
   pp (Fns m) = PP.vcat $ concat [
-    [PP.text "-- Group:"],
+    ["-- Group:"],
     [pp $ Def (App s i ps) e |
       (s, nm, _, pes) <- m,
       let i = Id s Ident Var nm,
       (ps, e) <- pes ],
-    [PP.text "-- End group"]]
+    ["-- End group"]]
 
 instance IsAST DefGroup where
   isValid (D d) = isValid d
