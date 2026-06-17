@@ -1,14 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 module AST(
   Span(..), noSpan, Mod(Mod), Imports, Var, Id, Import, Defs, FixDir(..),
-  Def(..), OpOrIdent(..), ConOrVar(..), Pat(..), Exp(..), Constant(..),
+  Def(..), OpOrIdent(..), ConOrVar(..), Pat, Exp(..), Constant(..),
   ValidErrs, PP(..), showPp, showsPp, IsAST(..),
-  Arity, DefGroup(..), groupDefs, patToPats, patsToPat
+  Arity, DefGroup(..), Clause, groupDefs, patToPats, patsToPat
 ) where
 import Data.ByteString(ByteString)
-import Data.Set as S hiding (null, map, foldr)
-import Data.Map as M hiding (null, map, foldr)
-import qualified Data.ByteString.UTF8 as UTF8
+import Data.Char(isUpper)
+import Data.Set hiding (null, map, foldr, difference)
+import qualified Data.Set as S
+import Data.Map as M hiding (null, map, foldr, difference)
+import Data.ByteString.UTF8(toString, fromString)
 import GHC.Stack(HasCallStack)
 import Prelude hiding (span)
 import Text.Megaparsec(SourcePos)
@@ -158,7 +160,7 @@ ppOp :: Exp -> Doc -> Exp -> Doc
 ppOp e1 op e2 = hang (pp e1 <+> op) 2 (pp e2)
 
 text :: ByteString -> Doc
-text = PP.text . UTF8.toString
+text = PP.text . toString
 
 ppBlock :: Doc -> Defs -> Doc
 ppBlock lhs (_, []) = lhs <+> text "{}"
@@ -318,15 +320,29 @@ instance IsAST Exp where
   fv (Ops e ops) = fv e <> foldMap (\(op, e2) -> fv op <> fv e2) ops
   fv (Case _ e ds) = fv e <> fv ds
   fv (If _ i t e) = fv i <> fv t <> fv e
-  fv (IfMatch _ p i t e) = fv i <> ((fv t <> fv e) `S.difference` fv p)
+  fv (IfMatch _ p i t e) = fv i <> ((fv t <> fv e) `difference` fv p)
   fv (Dot _ es) = fv es
   fv (Paren _ e) = fv e
   fv (Tuple _ es) = foldMap fv es
   fv (List _ es) = foldMap fv es
-  fv (Do _ p e ds) = fv e <> (fvDefs ds `S.difference` fv p)
-  fv (Assign _ l e) = fv e `S.difference` fv l
+  fv (Do _ p e ds) = fv e <> (fvDefs ds `difference` fv p)
+  fv (Assign _ l e) = fv e `difference` fv l
   fv (Block ds) = fvDefs ds
   fv (OpExp _ e) = fv e
+
+-- Subtract away variables bound by a match.
+-- Note that this must not include constructors!
+difference :: Set Var -> Set Var -> Set Var
+difference as bs = as `S.difference` S.filter isVar bs where
+
+-- Based on the name, is this a variable, rather than a constructor?
+isVar :: Var -> Bool
+isVar "[]" = False -- These are used internally as constructors.
+isVar "()" = False -- (For all tuples in this case)
+isVar v =
+  case toString v of
+    (c:_) -> not (isUpper c || c == ':')
+    _ -> error "Var is the empty string"
 
 isOppy :: Exp -> ValidErrs
 isOppy (Id _ Op _ _) = []
@@ -504,9 +520,10 @@ isDisjunct (s, _) = [(s, "Not a valid case disjunct")]
 
 type Arity = Int
 
+type Clause = ([Pat], Exp)
 data DefGroup
   = D Def
-  | Fns [(Span, Var, Arity, [([Pat], Exp)])]
+  | Fns [(Span, Var, Arity, [Clause])]
   | Record (Map Var Exp)
   deriving (Eq, Show)
 
@@ -547,7 +564,7 @@ instance IsAST DefGroup where
   noParen (Fns gs) =
     Fns [ (s, v, a, [(noParen as, noParen e) | (as, e) <- ds]) |
           (s,v,a,ds) <- gs ]
-  fv (Fns fs) = S.unions [ fv e `S.difference` fv ps | (_, _, _, rs) <- fs, (ps, e) <- rs ]
+  fv (Fns fs) = S.unions [ fv e `difference` fv ps | (_, _, _, rs) <- fs, (ps, e) <- rs ]
   fv g = fvGroup g mempty
 
 fvDefs :: Defs -> Set Var
@@ -558,12 +575,12 @@ fvDefs ds =
 
 fvGroup :: DefGroup -> Set Var -> Set Var
 fvGroup (Record r) later = later <> fv (M.elems r)
-fvGroup (D (BindExp (Asc _ (Id _ _ _ i) _))) later = later `S.difference` S.singleton i
+fvGroup (D (BindExp (Asc _ (Id _ _ _ i) _))) later = later `difference` S.singleton i
 fvGroup (D (BindExp (Paren _ e))) later = fvGroup (D (BindExp e)) later
 fvGroup (D (BindExp (Asc s (Paren _ e) t))) later = fvGroup (D (BindExp (Asc s e t))) later
-fvGroup (D (Def pat e)) later = fv e <> (later `S.difference` fv pat)
+fvGroup (D (Def pat e)) later = fv e <> (later `difference` fv pat)
 fvGroup (D d) later = later <> fv d
-fvGroup (Fns fs) later = (later <> rhs) `S.difference` vs
+fvGroup (Fns fs) later = (later <> rhs) `difference` vs
   where vs = S.fromList [ v | (_, v, _, _) <- fs ]
         rhs = fv (Fns fs)
 
@@ -599,26 +616,28 @@ groupDef (_, a@(BindExp (Asc _ (Id _ _ Var _) _))) (Right (Fns m : bs)) =
   Right (Fns m : D a : bs)
 groupDef (_, Def (Id _ _ Var var) e) (Right []) = Right [Record (M.singleton var e)]
 groupDef (_, Def (Id _ _ Var var) e) (Right [Record m]) = Right [Record (M.insert var e m)]
-groupDef (s, d) (Right (Record _ : _)) = Left [(s, UTF8.fromString (show (pp d)) <> " is not a struct binding")]
+groupDef (s, d) (Right (Record _ : _)) = Left [(s, fromString (show (pp d)) <> " is not a struct binding")]
 groupDef (_, d@(BindExp _)) (Right ts) = Right ((D d):ts)
 groupDef (s, Def (Asc _ p _) e) ts = groupDef (s, Def p e) ts
 groupDef (_, d) (Right ts) = Right (D d : ts)
 groupDef _ (Left e) = Left e
 
-fnToGroup :: Span -> Var -> Defs -> (Span, Var, Arity, [([Pat], Exp)])
+fnToGroup :: Span -> Var -> Defs -> (Span, Var, Arity, [Clause])
 fnToGroup s f (_, ds) = (s, f, aty cs, cs) where
-  cs :: [([Exp], Exp)] = map (defToClause . snd) ds
+  cs :: [Clause] = map (defToClause . snd) ds
   aty [] = error "Empty clauses"
   aty ((ps,_):_) = length ps
   defToClause (Def p e) = (patToPats p, e)
   defToClause d = error ("Bad clause " <> showPp d)
 
+-- Turn a singleton pattern from case to a clausal list of patterns
 patToPats :: Pat -> [Pat]
 patToPats (Asc _ p _) = patToPats p
 patToPats (Paren _ p) = [p]
 patToPats (App _ p ps) = p:ps
 patToPats p = [p]
 
+-- Turn a clausal list of patterns into a match pattern
 patsToPat :: [Pat] -> Pat
 patsToPat [] = error "patsToPat []"
 patsToPat [p] = Paren (span p) p

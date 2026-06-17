@@ -2,7 +2,8 @@
 module Parse(file, partialFile, toplevel,
              def, defs, block, exp,
              unfix, unfixExp,
-             ppWithSpan, SpanPos, spanPrefix, validate) where
+             ppWithSpan, spanError,
+             spanPos, SpanPos, spanPrefix, validate) where
 import AST
 import Control.Monad
 import Data.ByteString(ByteString)
@@ -15,6 +16,7 @@ import Data.Maybe
 import Data.Void(Void)
 import Data.Map hiding (empty, foldr)
 import Data.Word(Word8)
+import GHC.Stack(HasCallStack)
 import Text.Megaparsec as P
 import Text.Megaparsec.Byte
 import Text.Megaparsec.Byte.Lexer as L
@@ -344,6 +346,9 @@ ppWithSpan :: IsAST a => SpanPos -> a -> PP.Doc
 ppWithSpan sp a =
   case sp (span a) of
     (start, end) -> PP.sep [PP.text (show start) <> "-" <> PP.text (show end) <> ":", pp a]
+
+spanError :: HasCallStack => Span -> String -> SpanPos -> a
+spanError s msg sp = error (spanPrefix s sp ++ msg)
 
 -- unfix functions resolve operator fixity.
 type Fixities = Map ByteString (FixDir, Int)

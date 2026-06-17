@@ -1,8 +1,9 @@
 {-# LANGUAGE OverloadedStrings, ApplicativeDo, PatternSynonyms, LambdaCase, TypeFamilies #-}
 module SimpleSemantics(evalTop) where
 import AST
-import Parse(SpanPos, spanPrefix)
+import Parse(SpanPos, spanError, spanPrefix)
 import Primitive
+import SemUtil
 import Value
 
 import Control.Monad
@@ -44,9 +45,6 @@ type Value = Val E
 -- Utilities not worth an import
 fromMaybe :: a -> Maybe a -> a
 fromMaybe d = maybe d id
-
-spanError :: HasCallStack => Span -> String -> SpanPos -> a
-spanError s msg sp = error (spanPrefix s sp ++ msg)
 
 -- Evaluation (environment) monads
 type St = (SpanPos, Env)
@@ -203,7 +201,7 @@ appWithDesc s d@(Desc nm n _ (CloFun f)) env nv vs
       f' <- withClo env (f vs')
       applyInner s f' vs''
 
-appDisjs :: HasCallStack => Span -> Var -> [([Pat], Exp)] -> [Value] -> E Value
+appDisjs :: HasCallStack => Span -> Var -> [Clause] -> [Value] -> E Value
 appDisjs s f [] vs = expError s ("Match failure in "++show f ++ " " ++ showsPp vs)
 appDisjs s f ((ps, e): cs) vs = do
   mv <- withMatch (matches ps vs) (eval e)
@@ -275,36 +273,6 @@ vClo s f n vs ds = do
 addCon :: HasCallStack => (Span, Def) -> E Value -> E Value
 addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) = conBinding c (cCon c (typeArity t))
 addCon (s, d) = const (expError s ("addCon: not a constructor def "++showPp d))
-
-typeArity :: HasCallStack => Exp -> Arity
-typeArity (Paren _ t) = typeArity t
-typeArity (Asc _ t _) = typeArity t
-typeArity (Arrow _ _ b) = 1 + typeArity b
-typeArity _ = 0
-
-cDesc :: ConName -> Arity -> Desc E
-cDesc v i = d where
-  d = Desc v i Fold (CloFun cf)
-  cf | i == 0 = error ("Applying 0-ary "++toString v)
-     | otherwise = pure . VObj d
-
-cCon :: ConName -> Arity -> Value
-cCon v i = VDesc (cDesc v i)
-
-toDisj :: HasCallStack => SpanPos -> (Span, Def) -> ([Pat], Exp)
-toDisj _ (_, Def p e) = ([p], e)
-toDisj sp (s, d) = spanError s ("Illegal case disjunct "++showPp d) sp
-
-mkRhs :: HasCallStack => Span -> [(Span, Def)] -> SpanPos -> (Arity, [([Exp], Exp)])
-mkRhs s0 ds sp = do
-  let one (_, Def p e) = (patToPats p, e)
-      one (_, d) = spanError s0 ("Unexpected disjunct "++showPp d) sp
-  case fmap one ds of
-    [] -> spanError s0 "Empty anonymous function." sp
-    c:cs
-      | all ((==a) . length . fst) cs -> (a, c:cs)
-      | otherwise -> spanError s0 ("Inconsistent arities, expect "++show a) sp
-      where a = length . fst $ c
 
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =

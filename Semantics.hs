@@ -3,6 +3,7 @@ module Semantics(evalTop) where
 import AST
 import Parse(SpanPos, spanPrefix)
 import Primitive
+import SemUtil
 import Value
 
 import Control.Monad
@@ -16,11 +17,11 @@ import Data.Map(Map)
 import qualified Data.Map as M
 import Data.Set(Set)
 import qualified Data.Set as S
+import Debug.Trace(trace)
 import GHC.Exts(IsList(..))
 import GHC.Stack(HasCallStack)
 import qualified Text.PrettyPrint as PP
 import Text.PrettyPrint((<+>))
-import Debug.Trace(trace)
 import Prelude hiding (span)
 
 trace_match :: Bool
@@ -513,7 +514,7 @@ appWithDesc s d@(Desc nm n _ (CloFun f)) vec nv vs
       f' <- withClo vec (f vs')
       applyInner s f' vs''
 
-appDisjs :: HasCallStack => Span -> Var -> [([Pat], Exp)] -> [Known] -> Ef [Value] Value
+appDisjs :: HasCallStack => Span -> Var -> [Clause] -> [Known] -> Ef [Value] Value
 appDisjs s f ds knp = do
   pes <- mapM (\(ps, e) -> withMatch (span ps) (matches ps knp) (eval e)) ds
   let kn = foldr1 (<>) (map fst pes)
@@ -584,7 +585,7 @@ evGroups (D (Def p e) : ts) = do
 evGroups (D (Data _ (_,ds)) : ts) = foldr addCon (evGroups ts) ds
 evGroups (g : _) = error ("Unexpected group "++showPp g)
 
-vClo :: HasCallStack => Span -> Var -> Arity -> Set Var -> [([Pat], Exp)] -> EV
+vClo :: HasCallStack => Span -> Var -> Arity -> Set Var -> [Clause] -> EV
 vClo s f n vs ds = do
   -- The icky thing here is we do the "closed vs" computation for every function
   -- in a binding group separately, even though the resulting env should be the same
@@ -608,36 +609,6 @@ vClo s f n vs ds = do
 addCon :: HasCallStack => (Span, Def) -> EV -> EV
 addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) = conBinding c (cCon c (typeArity t))
 addCon (s, d) = const (expError s ("addCon: not a constructor def "++showPp d))
-
-typeArity :: HasCallStack => Exp -> Arity
-typeArity (Paren _ t) = typeArity t
-typeArity (Asc _ t _) = typeArity t
-typeArity (Arrow _ _ b) = 1 + typeArity b
-typeArity _ = 0
-
-cDesc :: ConName -> Arity -> Desc EI
-cDesc v i = d where
-  d = Desc v i Fold (CloFun cf)
-  cf | i == 0 = error ("Applying 0-ary "++toString v)
-     | otherwise = pure . VObj d
-
-cCon :: ConName -> Arity -> Value
-cCon v i = VDesc (cDesc v i)
-
-toDisj :: HasCallStack => SpanPos -> (Span, Def) -> ([Pat], Exp)
-toDisj _ (_, Def p e) = ([p], e)
-toDisj sp (s, d) = spanError s ("Illegal case disjunct "++showPp d) sp
-
-mkRhs :: HasCallStack => Span -> [(Span, Def)] -> SpanPos -> (Arity, [([Exp], Exp)])
-mkRhs s0 ds sp = do
-  let one (_, Def p e) = (patToPats p, e)
-      one (_, d) = spanError s0 ("Unexpected disjunct "++showPp d) sp
-  case fmap one ds of
-    [] -> spanError s0 "Empty anonymous function." sp
-    c:cs
-      | all ((==a) . length . fst) cs -> (a, c:cs)
-      | otherwise -> spanError s0 ("Inconsistent arities, expect "++show a) sp
-      where a = length . fst $ c
 
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =

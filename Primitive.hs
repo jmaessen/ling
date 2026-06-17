@@ -1,6 +1,6 @@
 {-# LANGUAGE LambdaCase, OverloadedStrings #-}
 module Primitive(env0) where
-import AST
+import AST(Arity, Constant(..), Var, showPp, showsPp)
 import Value
 
 import Data.ByteString(ByteString)
