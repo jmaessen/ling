@@ -5,6 +5,7 @@
 *.dyn_o
 *.p_hi
 *.p_o
+ling
 
 # Cabal / Stack output
 dist/
