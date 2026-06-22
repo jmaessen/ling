@@ -20,8 +20,6 @@ import qualified Data.Set as S
 import Debug.Trace(trace)
 import GHC.Exts(IsList(..))
 import GHC.Stack(HasCallStack)
-import qualified Text.PrettyPrint as PP
-import Text.PrettyPrint((<+>))
 import Prelude hiding (span)
 
 trace_match :: Bool
@@ -83,36 +81,7 @@ type CloMap = BV Int
 
 -- Closures, Descriptors, and Values
 type Value = Val EI
-
-data SimEnv = SameEnv | DiffEnv deriving (Eq, Show)
-
-data Known
-  = Unknown
-  | KnownValue Value
-  | KnownDesc SimEnv (Desc EI)
-  deriving (Eq, Show)
-
-sameEnv :: Known -> Known
-sameEnv (KnownDesc _ d) = KnownDesc SameEnv d
-sameEnv kn = kn
-
--- The information-theoretic join on Known
-instance Semigroup Known where
-  a <> b
-    | a == b = a
-  KnownValue (VObj a _) <> KnownValue (VObj b _)
-    | a == b = KnownDesc DiffEnv a
-  KnownValue (VPAp a _ _) <> KnownValue (VPAp b _ _)
-    | a == b = KnownDesc DiffEnv a
-  _ <> _ = Unknown
-
-instance PP Known where
-  pp Unknown = "Unknown"
-  pp (KnownValue v) = pp v
-  pp (KnownDesc SameEnv (Desc v n _ _)) =
-    "<k same env " <+> PP.text (toString v) <+> (PP.int n <> ">")
-  pp (KnownDesc _ (Desc v n _ _)) =
-    "<k" <+> PP.text (toString v) <+> (PP.int n <> ">")
+type Known = Knw EI
 
 -- Utilities not worth an import
 fromMaybe :: a -> Maybe a -> a
@@ -263,24 +232,7 @@ conBinding i v r = do
     (kn, r') <- r
     pure (kn, local (push v) r')
 
--- Match monad.  First, static information about a match.
-data Mode = AlwaysSucceeds | MayFail | AlwaysFails deriving (Eq, Show)
-
--- The join semigroup (disjoint conditions)
-instance Semigroup Mode where
-  MayFail <> _ = MayFail
-  AlwaysSucceeds <> AlwaysSucceeds = AlwaysSucceeds
-  AlwaysSucceeds <> _ = MayFail
-  AlwaysFails <> AlwaysFails = AlwaysFails
-  AlwaysFails <> _ = MayFail
-
--- The meet semigroup (same condition)
-meet :: Mode -> Mode -> Mode
-meet AlwaysFails _ = AlwaysFails
-meet AlwaysSucceeds o = o
-meet MayFail AlwaysFails = AlwaysFails
-meet MayFail _ = MayFail
-
+-- The match monad
 type MO a = State Outer a -- Outer: compute match environment, flag dup bindings.
 type MI a = StateT Inner Maybe a -- Inner: decide match and bind variables
 type M v a = MO (Mode, v -> MI a) -- Analyze, produce matcher for v yielding a.
@@ -386,10 +338,6 @@ match' (Const _ _) (KnownValue _) = alwaysFail
 match' (Const _ c) _ = mayFail $ \case
   (VConst vc) | c == vc -> pure ()
   _ -> matchFail
-match' (Tuple s []) kn =
-  match' (Id s Op Con "()") kn
-match' (Tuple s es) kn =
-  match' (App s (Id s Op Con "()") es) kn
 match' (Block (_, ds)) _ = do
   ms <- map snd <$> mapM matchField ds
   mayFail $ \case

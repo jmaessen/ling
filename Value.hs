@@ -4,13 +4,15 @@ module Value(
   Desc(..), CloFun(..), Foldability(..),
   FieldName, ConName,
   MonadEval(..),
-  toListVal) where
+  toListVal,
+  SimEnv(..), Knw(..), sameEnv,
+  Mode(..), meet) where
 import AST
 
 import Data.ByteString
 import Data.ByteString.UTF8(toString)
 import Data.Map
-import Text.PrettyPrint as PP hiding ((<>))
+import Text.PrettyPrint as PP hiding ((<>), Mode)
 
 -- Simple type aliases
 type FieldName = ByteString
@@ -80,3 +82,52 @@ instance PP (Val m) where
   pp (VStruct vs) =
     PP.vcat [PP.lbrace, "", PP.nest 2 (PP.vcat $ fmap ppField (toList vs)), PP.rbrace]
     where ppField (f, v) = PP.text (toString f) <+> "=" <+> pp v
+
+-- Known-ness (abstract domain of value information)
+data SimEnv = SameEnv | DiffEnv deriving (Eq, Show)
+
+data Knw m
+  = Unknown
+  | KnownValue (Val m)
+  | KnownDesc SimEnv (Desc m)
+  deriving (Eq, Show)
+
+sameEnv :: Knw m -> Knw m
+sameEnv (KnownDesc _ d) = KnownDesc SameEnv d
+sameEnv kn = kn
+
+-- The information-theoretic join on Knw m
+instance MonadEval m => Semigroup (Knw m) where
+  a <> b
+    | a == b = a
+  KnownValue (VObj a _) <> KnownValue (VObj b _)
+    | a == b = KnownDesc DiffEnv a
+  KnownValue (VPAp a _ _) <> KnownValue (VPAp b _ _)
+    | a == b = KnownDesc DiffEnv a
+  _ <> _ = Unknown
+
+instance PP (Knw m) where
+  pp Unknown = "Unknown"
+  pp (KnownValue v) = pp v
+  pp (KnownDesc SameEnv (Desc v n _ _)) =
+    "<k same env " <+> PP.text (toString v) <+> (PP.int n <> ">")
+  pp (KnownDesc _ (Desc v n _ _)) =
+    "<k" <+> PP.text (toString v) <+> (PP.int n <> ">")
+
+-- Match Mode (static information about a match).
+data Mode = AlwaysSucceeds | MayFail | AlwaysFails deriving (Eq, Show)
+
+-- The join semigroup (disjoint conditions)
+instance Semigroup Mode where
+  MayFail <> _ = MayFail
+  AlwaysSucceeds <> AlwaysSucceeds = AlwaysSucceeds
+  AlwaysSucceeds <> _ = MayFail
+  AlwaysFails <> AlwaysFails = AlwaysFails
+  AlwaysFails <> _ = MayFail
+
+-- The meet semigroup (same condition)
+meet :: Mode -> Mode -> Mode
+meet AlwaysFails _ = AlwaysFails
+meet AlwaysSucceeds o = o
+meet MayFail AlwaysFails = AlwaysFails
+meet MayFail _ = MayFail

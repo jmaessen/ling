@@ -83,7 +83,7 @@ findEnv s i = asks (lookupEnv s i)
 -- Takes a computation that computes bindings and evaluates
 -- it in an env containing those bindings, then evaluates
 -- the rest in that environment.
-fixEnv :: (E [(Var, Value)]) -> E Value -> E Value
+fixEnv :: E [(Var, Value)] -> E Value -> E Value
 fixEnv a inner = do
   (sp, env) <- ask
   let vs = runEnv a (sp, env')
