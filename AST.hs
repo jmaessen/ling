@@ -3,7 +3,7 @@ module AST(
   Span(..), noSpan, Mod(Mod), Imports, Var, Id, Import, Defs, FixDir(..),
   Def(..), OpOrIdent(..), ConOrVar(..), Pat, Exp(..), Constant(..),
   ValidErrs, PP(..), showPp, showsPp, IsAST(..),
-  Arity, DefGroup(..), Clause, groupDefs, patToPats, patsToPat
+  Arity, DefGroup(..), Clause, GroupFun, groupDefs, patToPats, patsToPat
 ) where
 import Data.ByteString(ByteString)
 import Data.Char(isUpper)
@@ -520,9 +520,10 @@ isDisjunct (s, _) = [(s, "Not a valid case disjunct")]
 type Arity = Int
 
 type Clause = ([Pat], Exp)
+type GroupFun = (Span, Var, Arity, [Clause])
 data DefGroup
   = D Def
-  | Fns [(Span, Var, Arity, [Clause])]
+  | Fns [GroupFun]
   | Record (Map Var Exp)
   deriving (Eq, Show)
 

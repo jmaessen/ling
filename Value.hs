@@ -90,6 +90,7 @@ data Knw m
   = Unknown
   | KnownValue (Val m)
   | KnownDesc SimEnv (Desc m)
+  | Bottom
   deriving (Eq, Show)
 
 sameEnv :: Knw m -> Knw m
@@ -98,6 +99,8 @@ sameEnv kn = kn
 
 -- The information-theoretic join on Knw m
 instance MonadEval m => Semigroup (Knw m) where
+  Bottom <> b = b
+  a <> Bottom = a
   a <> b
     | a == b = a
   KnownValue (VObj a _) <> KnownValue (VObj b _)
@@ -106,6 +109,9 @@ instance MonadEval m => Semigroup (Knw m) where
     | a == b = KnownDesc DiffEnv a
   _ <> _ = Unknown
 
+instance MonadEval m => Monoid (Knw m) where
+  mempty = Bottom
+
 instance PP (Knw m) where
   pp Unknown = "Unknown"
   pp (KnownValue v) = pp v
@@ -113,17 +119,20 @@ instance PP (Knw m) where
     "<k same env " <+> PP.text (toString v) <+> (PP.int n <> ">")
   pp (KnownDesc _ (Desc v n _ _)) =
     "<k" <+> PP.text (toString v) <+> (PP.int n <> ">")
+  pp Bottom = "Bottom (Unreachable)"
 
 -- Match Mode (static information about a match).
 data Mode = AlwaysSucceeds | MayFail | AlwaysFails deriving (Eq, Show)
 
 -- The join semigroup (disjoint conditions)
 instance Semigroup Mode where
+  AlwaysSucceeds <> _ = AlwaysSucceeds
+  AlwaysFails <> o = o
+  MayFail <> AlwaysSucceeds = AlwaysSucceeds
   MayFail <> _ = MayFail
-  AlwaysSucceeds <> AlwaysSucceeds = AlwaysSucceeds
-  AlwaysSucceeds <> _ = MayFail
-  AlwaysFails <> AlwaysFails = AlwaysFails
-  AlwaysFails <> _ = MayFail
+
+instance Monoid Mode where
+  mempty = AlwaysFails
 
 -- The meet semigroup (same condition)
 meet :: Mode -> Mode -> Mode

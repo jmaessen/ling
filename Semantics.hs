@@ -306,7 +306,7 @@ matches' ps ks = do
   let n = length ps
   fs <- zipWithM match' ps ks
   sp <- matchSP
-  pure (foldl1 (<>) (map fst fs), \vs ->
+  pure (foldr meet AlwaysSucceeds (map fst fs), \vs ->
     if length vs == n then
       zipWithM_ (($) . snd) fs vs
     else
@@ -481,9 +481,9 @@ eval (App s e es) = do
   sPre <- spanPrefix s <$> expSP
   pure $ apply sPre e' es'
 eval (Const _ c) = pure (KnownValue $ VConst c, pure $ VConst c)
-eval e@(Fn s (_, ds)) = do
+eval e@(Fn s (_, ds)) = withDiffEnv $ do
   (a, cs) <- mkRhs s ds <$> expSP
-  withDiffEnv $ vClo s "<anon>" a (fv e) cs
+  vClo s "<anon>" a (fv e) cs
 eval (Tuple _ es) = do
   es' <- traverse eval es
   let d = cDesc "()" (length es')
