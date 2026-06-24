@@ -1,5 +1,6 @@
 module Ling where
 import AST
+import Compile
 import Desugar
 import GHC.Stack(HasCallStack)
 import Parse
@@ -9,6 +10,7 @@ import System.Environment(getArgs)
 
 data What
   = Go
+  | Compile
   | Simple
   | Pp
   | Show
@@ -23,6 +25,7 @@ args ("--show" : as) = (Show, as)
 args ("--simple" : as) = (Simple, as)
 args ("--paren" : as) = (FParen, as)
 args ("--desugar" : as) = (Desugar, as)
+args ("-C" : as) = (Compile, as)
 args (a:as) = (a:) <$> args as
 args [] = (Go, [])
 
@@ -34,7 +37,8 @@ main = do
   case what of
     Go -> mapM_ (print . pp . evalTop . desugar . validate) $ fs
     Simple -> mapM_ (print . pp . Simple.evalTop . desugar . validate) $ fs
+    Compile -> mapM_ (print . Compile.compileTop . desugar . validate) $ fs
     Pp -> mapM_ (print . pp . snd) $ fs
     Show -> mapM_ (mapM_ print . snd . snd) $ fs
     FParen -> mapM_ (print . pp . fullParen . snd) $ fs
-    Desugar -> mapM_ (print .  pp . fullParen . snd . desugar . validate) $ fs
+    Desugar -> mapM_ (print . pp . snd . desugar . validate) $ fs
