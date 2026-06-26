@@ -2,9 +2,9 @@
 module Names(
   Name(..), TakenNames, taken0,
   GL(..),
-  mangle, takeName, untaken,
+  mangle, takeName, cloneName,
   orig, mangling, funcOf,
-  contextArg, envArg
+  contextArg, envArg, toVar
 ) where
 import AST(Var, PP(..))
 import Parse(isIdCont)
@@ -38,6 +38,10 @@ instance Ord Name where
 instance PP Name where
   pp (N _ m (-1)) = pp m
   pp (N _ m i) = pp m <> PP.integer i
+
+toVar :: Name -> Var
+toVar (N _ m (-1)) = m
+toVar (N _ m i) = m <> fromString (show i)
 
 type TakenNames = Map ByteString (Set Integer)
 
@@ -177,8 +181,9 @@ rts = [
   "ling_desc_is",
   "ling_env", -- env arg
   "ling_field", -- field getter (obj, n) numbering from 0
+  "ling_fill_env", -- fill env
+  "ling_mk_env", -- allocate env
   "ling_new_obj", -- allocate (ctxt, desc, args...)
-  "LING_OBJ", -- static object creation
   "ling_obj", -- object type
   "ling_pap", -- partial app (ctxt, desc, n, args...)
   "ling_tuple", -- tuple (ctxt, n, args...)
@@ -208,10 +213,15 @@ mangle v = do
       | otherwise -> -- Op
         untaken v ("_0p_" <> CS.concatMap encodeOp v)
 
+cloneName :: Name -> GL -> TakenNames -> Name
+cloneName (N v m _) gl tn = untaken v m gl tn
+
+ins :: Var -> Integer -> TakenNames -> TakenNames
+ins m n = M.insertWith (<>) m (S.singleton n)
+
 takeName :: Name -> TakenNames -> TakenNames
 takeName (N _ m n) taken =
-  M.insertWith (<>) (m <> "_FUNC") (S.singleton n) $
-  M.insertWith (<>) m (S.singleton n) taken
+  ins (m <> "_FUNC") n $ ins m n taken
 
 orig :: Name -> Var
 orig (N o _ _) = o
@@ -219,5 +229,5 @@ orig (N o _ _) = o
 mangling :: Name -> Mangled
 mangling (N _ m _) = m
 
-funcOf :: Name -> PP.Doc
+funcOf :: (PP a) => a -> PP.Doc
 funcOf nm = pp nm <> "_FUNC"
