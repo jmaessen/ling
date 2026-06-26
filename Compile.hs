@@ -36,13 +36,13 @@ What's the mangled character mapping?  Alphabetic, then fall back to _decimal?
 -}
 
 trace_match :: Bool
-trace_match = True
+trace_match = False
 
 trace_app_compile :: Bool
 trace_app_compile = False || trace_app
 
 trace_app :: Bool
-trace_app = True
+trace_app = False
 
 traceM :: (PP a, PP c) => a -> String -> c -> b -> b
 traceM a s c b | trace_match = trace (showPp a++s++showPp c) b
@@ -177,13 +177,13 @@ instance MonadEval E where
   withClo = error "We don't withClo, callee unpacks"
 
 withName :: (HasCallStack, MonadState St m) => Var -> m Name
-withName i = trace ("withName "++show i) $ do
+withName i = do
   st <- get
   let gl = gl_ st
       tn = tn_ st
       n = mangle i gl tn
       tn' = takeName n tn
-  put $ trace ("putting "++show i) $ st{ tn_ = tn' }
+  put $ st{ tn_ = tn' }
   pure $ n
 
 bindEnvWith ::
@@ -598,7 +598,6 @@ appDisjs s ds kns k = do
     pure r)
 
 eval :: HasCallStack => Exp -> EV
-eval e _ | trace ("eval "++showPp e) False = undefined
 eval (Id s _ _ i) k = do
   en <- findEnv s i
   pure (kn_ en, cont k $ pure $ pp $ n_ en)
@@ -653,16 +652,19 @@ evGroups [Record m] k = do
   ms <- locally $ traverse (\e -> eval e Exp) m
   pure (Unknown, cont k $
     ms `seq` error "TODO evGroups record")
-evGroups [D (BindExp e)] k = trace "BindExp final" $ locally $ eval e k
-evGroups (D (Data t ~(_,ds)) : ts) k = trace ("data "++showPp t) $ foldr addCon (evGroups ts k) ds
-evGroups ts Exp = contBind "block_val" (evGroups ts) Exp
-evGroups (Fns fs:ts) k = trace ("Fns "++show (map (\(~(_,v,_,_)) -> v) fs)) $
+evGroups [D (BindExp e)] k =
+  locally $ eval e k
+evGroups (D (Data t ~(_,ds)) : ts) k =
+  foldr addCon (evGroups ts k) ds
+evGroups ts Exp =
+  contBind "block_val" (evGroups ts) Exp
+evGroups (Fns fs:ts) k =
   withDiffEnv $ fixEnv (evFns fs) (evGroups ts k)
-evGroups (D (BindExp e) : ts) k = trace "BindExp" $ do
+evGroups (D (BindExp e) : ts) k = do
   ~(_, e') <- locally $ eval e Exp
   ~(kn, r) <- evGroups ts k
   pure (kn, e' >> r)
-evGroups (D (Def p e) : ts) k = trace ("Def "++showPp p) $ do
+evGroups (D (Def p e) : ts) k = do
   sloc <- spanPrefix (span p) <$> expSP
   let v = snd $ patVar p
       matchErr = cMatchError sloc
@@ -706,7 +708,6 @@ evFns fs = do
 type CloInfo = (CG (), Maybe Name, E V -> E V)
 
 closed :: Set Var -> E CloInfo
-closed vs | trace ("closed "++show vs) $ False = undefined
 closed vs = do
   env <- gets env_
   earg <- withClone envArg
@@ -756,7 +757,6 @@ noFold :: CloFun E
 noFold = CloFun $ \_ -> error "Can't fold fns"
 
 vClo :: HasCallStack => Span -> Name -> Arity -> CloInfo -> [Clause] -> EV
-vClo _ f _ _ _ _ | trace ("vClo "++showPp f) False = undefined
 vClo s f n ci@(_, envName, unpackAndBind) cs k = do
   let
     d = Desc (toVar f) n NoFold noFold
