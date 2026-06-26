@@ -7,9 +7,11 @@ import Primitive
 import SemUtil
 import Value
 
+-- import Control.Applicative hiding (Const(..))
 import Control.Monad
 import Control.Monad.State
 import Data.ByteString.UTF8(toString)
+import Data.Foldable(traverse_)
 import Data.Map(Map)
 import qualified Data.Map as M
 import Data.Set(Set)
@@ -18,6 +20,8 @@ import Debug.Trace(trace)
 import GHC.Stack(HasCallStack)
 import Text.PrettyPrint hiding ((<>), Mode)
 import Prelude hiding (span)
+
+infixl 5 $*$
 
 {-
 ## Variable conventions
@@ -73,26 +77,36 @@ cFuncHeader n as = do
   cCall ("ling_obj" <+> funcOf n) ps
 
 cReturn :: Code -> Code
-cReturn c = sep ["return", (c <> ";")]
+cReturn c = hang "return" 2 (c <> semi)
 
 cLabel :: Doc -> Label -> Code
-cLabel s l = s <> integer l <> ":"
+cLabel s l = nest (-1) (s <> integer l <> colon)
 
 cGoto :: Doc -> Label -> Code
-cGoto s l = "goto" <+> (s <> integer l <> ";")
+cGoto s l = "goto" <+> (s <> integer l <> semi)
+
+cArray :: [Code] -> Code
+cArray cs = braces (nest 2 $ fsep $ punctuate comma cs)
 
 -- One-sided if statement
 cIf :: Code -> Code -> Code
 cIf p t = sep [ hsep [ "if", parens p, lbrace ], nest 2 t, rbrace ]
 
+cMatchError :: String -> Code
+cMatchError sloc = cReturn (cCall "ling_match_error" [text (show sloc)])
+
 -- Naming and Environments
 
 data Entry = En {
+  cv_ :: ConOrVar,
   kn_ :: Known,
   vgl_ :: GL,
   n_ :: Name}
     deriving (Eq, Show)
 type Env = Map Var Entry
+
+lazyEn :: Entry -> Entry
+lazyEn e = En { cv_ = cv_ e, kn_ = kn_ e, vgl_ = vgl_ e, n_ = n_ e }
 
 -- Closures, Descriptors, and Values
 type Value = Val E
@@ -102,6 +116,16 @@ type Code = Doc
 -- Utilities not worth an import
 fromMaybe :: a -> Maybe a -> a
 fromMaybe d = maybe d id
+
+zipWithA :: Applicative m => (a -> b -> m c) -> [a] -> [b] -> m [c]
+zipWithA f as bs = sequenceA (zipWith f as bs)
+
+-- Vertical separation with blank space
+($*$) :: Doc -> Doc -> Doc
+a $*$ b
+  | isEmpty a = b
+  | isEmpty b = a
+  | otherwise = a $$ "" $$ b
 
 -- Evaluation (environment) monads
 data Cont = Bind Name | Return | Exp deriving (Eq, Show)
@@ -121,11 +145,11 @@ data Inner = Inner {
   -- Function-persistent state
   decls_ :: Code,
   stmts_ :: Code}
-newtype E a = E (State St a)
-  deriving (Functor, Applicative, Monad, MonadState St)
-newtype EI a = EI (State Inner a)
-  deriving (Functor, Applicative, Monad, MonadState Inner)
-type V = (Known, EI Code) -- Result is for point of use
+type E = (State St)
+--  deriving (Functor, Applicative, Monad, MonadState St)
+type CG a = (State Inner a)
+--  deriving (Functor, Applicative, Monad, MonadState Inner)
+type V = (Known, CG Code) -- Result is for point of use
 type EV = Cont -> E V
 
 -- Merge old and new state, reverting transient to old state.
@@ -146,7 +170,7 @@ local trans act = do
   pure r
 
 runExp :: E a -> St -> (a, St)
-runExp (E r) = runState r
+runExp (r) = runState r
 
 instance MonadEval E where
   type ClosureState E = Name -- Of local containing env object
@@ -159,24 +183,24 @@ withName i = trace ("withName "++show i) $ do
       tn = tn_ st
       n = mangle i gl tn
       tn' = takeName n tn
-  put (st{ tn_ = tn' })
-  trace (show i <> " -> " <> show n) $ pure n
+  put $ trace ("putting "++show i) $ st{ tn_ = tn' }
+  pure $ n
 
 bindEnvWith ::
-  (Entry -> Entry -> Entry) -> Var -> (Known, Name) -> St -> St
-bindEnvWith c i (kn, nm) st =
-  st{ env_ = M.insertWith c i (En kn (gl_ st) nm) (env_ st) }
+  (Entry -> Entry -> Entry) -> Var -> (ConOrVar, Known, Name) -> St -> St
+bindEnvWith c i (cv, kn, nm) st =
+  st{ env_ = M.insertWith c i (En cv kn (gl_ st) nm) (env_ st) }
 
 lookupEnv :: HasCallStack => Span -> Var -> St -> Entry
-lookupEnv s i (St {env_ = env, sp_ = sp}) =
+lookupEnv s i ~(St {env_ = env, sp_ = sp}) =
   fromMaybe (spanError s ("Unbound variable "++toString i) sp) $
     M.lookup i env
 
 -- Make a local replica of a name, mostly for the builtin names.
 withClone :: Name -> E Name
-withClone (N o m _) = do
+withClone n = do
   st <- get
-  let r = untaken o m (gl_ st) (tn_ st)
+  let r = cloneName n (gl_ st) (tn_ st)
   put (st{ tn_ = takeName r (tn_ st) })
   pure r
 
@@ -214,14 +238,14 @@ newLabel = state $ \st -> do
   let lbl = nlbl_ st
   (lbl, st { nlbl_ = lbl + 1 })
 
-toplevel :: Code -> EI ()
-toplevel c = modify (\st -> st { fns_ = fns_ st $$ "" $$ c })
+toplevel :: Code -> CG ()
+toplevel c = modify (\st -> st { fns_ = fns_ st $*$ c })
 
-mkFnDecl :: Name -> Int -> EI ()
+mkFnDecl :: Name -> Int -> CG ()
 mkFnDecl n a =
-  modify (\st -> st { fns_ = fns_ st $$ "" $$ (cFuncDecl n a <> ";") })
+  modify (\st -> st { fns_ = fns_ st $*$ (cFuncDecl n a <> semi) })
 
-mkFn :: Name -> [Name] -> EI a -> EI a
+mkFn :: Name -> [Name] -> CG a -> CG a
 mkFn n as body = do
   st <- get
   put (st { decls_ = mempty, stmts_ = mempty })
@@ -229,53 +253,51 @@ mkFn n as body = do
   st' <- get
   let func = vcat [
         cFuncHeader n as <+> lbrace,
-        nest 2 (decls_ st' $$ "" $$ stmts_ st'),
+        nest 2 (decls_ st' $*$ stmts_ st'),
         rbrace]
-  put (st { fns_ = fns_ st' $$ "" $$ func })
+  put (st { fns_ = fns_ st' $*$ func })
   pure r
 
-mkDesc :: Name -> Int -> EI ()
+mkDesc :: Name -> Int -> CG ()
 mkDesc n@(N v _ _) a =
   toplevel $ sep [
-    hsep ["const", "ling_desc", pp n, "=", lbrace],
-    nest 2 $ fsep ["&"<>pp n, int a, "&"<>funcOf n, text (show v)],
+    hsep ["const", "ling_obj", (pp n)<>"[]", "=", lbrace],
+    nest 2 $ fsep (punctuate comma [pp n, int a, "&"<>funcOf n, text (show v)]),
     rbrace]
 
 -- Takes a computation that computes bindings and evaluates
 -- it in an env containing those bindings, then evaluates
 -- the rest in that environment.
-fixEnv :: E ([(Var, (Known, Name))], EI ()) -> E V -> E V
+fixEnv :: E ([(Var, (Known, Name))], CG ()) -> E V -> E V
 fixEnv a inner = do
   st <- get
-  let ((vs, act), st'') = runExp a st'
+  let ~(~(vs, act), st') = runExp (withEnv env' a) st
       gl = gl_ st
       env = env_ st
-      env_i = M.fromList [ (i, En { kn_ = kn, vgl_ = gl, n_ = n }) | (i, (kn, n)) <- vs ]
-      env' = fmap (\en -> en { kn_ = sameEnv (kn_ en) }) env_i <> env
+      env_i = M.fromList [ (i, En { cv_ = Var, kn_ = kn, vgl_ = gl, n_ = n }) | ~(i, ~(kn, n)) <- vs ]
+      env' = fmap (\en -> lazyEn $ en { kn_ = sameEnv (kn_ en) }) env_i <> env
       env'' =  env_i <> env
-      st' = st{ env_ = env' }
-  trace ("fix\n"++show env_i++"\n"++show env'') $ put (st `oldNew` st'')
-  (k, act') <- withEnv env'' inner
+  put (st `oldNew` st')
+  ~(k, act') <- withEnv env'' inner
   pure (k, act >> act')
 
 -- Handles a *constant* binding (constructor def)
-conBinding :: Var -> Desc E -> E V -> E V
-conBinding i d@(Desc _ a _ _) act = do
-  nm <- withName i
-  st <- bindEnvWith const i (KnownValue (VDesc d), nm) <$> get
+conBinding :: Var -> Name -> Desc E -> E V -> E V
+conBinding i nm d@(Desc _ a _ _) act = do
+  st <- bindEnvWith const i (Con, KnownValue (VDesc d), nm) <$> get
   local (const st) $ do
     (kn, gen) <- act
     pure (kn, do
       let as = fmap (N "arg" "arg") [0..toInteger a - 1]
-      vCloDecl nm a
+      mkFnDecl nm a
+      mkDesc nm a
       mkFn nm as $ do
-        stmt (sep ["return", cCall "ling_new_obj" (pp <$> contextArg : nm : as) <> ";"])
+        stmt (sep ["return", cCall "ling_new_obj" (pp <$> contextArg : nm : as) <> semi])
       gen)
 
 -- Match monad.
 type MM a = State St a
-type MI a = State Inner a
-type Match = (Mode, MI ())
+type Match = (Mode, CG ())
 type M v = v -> Code -> MM Match -- Matcher for v running Code on failure.
 
 -- Matched is where we handle mangling and adding to the env.
@@ -283,7 +305,7 @@ matched :: Span -> Var -> (Known, Name) -> MM Match
 matched s i (kn, nm) = do
   sp <- matchSP
   let collide _ _ = spanError s ("Duplicate pattern bindings for variable "++toString i) sp
-  modify $ bindEnvWith collide i (kn, nm)
+  modify $ bindEnvWith collide i (Var, kn, nm)
   pure (AlwaysSucceeds, pure ())
 
 alwaysSucceed :: MM Match
@@ -292,7 +314,7 @@ alwaysSucceed = pure (AlwaysSucceeds, stmt "// Always succeeds")
 alwaysFail :: Code -> MM Match
 alwaysFail sfail = pure (AlwaysFails, stmt sfail)
 
-mayFail :: MI () -> MM Match
+mayFail :: CG () -> MM Match
 mayFail f = pure (MayFail, f)
 
 matchSP :: MM SpanPos
@@ -301,10 +323,10 @@ matchSP = gets sp_
 matchError :: HasCallStack => Span -> String -> MM a
 matchError s msg = spanError s msg <$> matchSP
 
-funName :: MonadState St m => Span -> Var -> m Name
+funName :: (HasCallStack, MonadState St m) => Span -> Var -> m Name
 funName s c = gets (n_ . lookupEnv s c)
 
-unreachable :: EI Code
+unreachable :: CG Code
 unreachable = pure "line_unreachable()"
 
 -- Inject match into evaluation
@@ -315,13 +337,14 @@ unreachable = pure "line_unreachable()"
 -- fail1: // next match
 --   ...
 -- success0:
-withMatch :: HasCallStack => M b -> E V -> Label -> b -> E (Mode, Known, EI Code)
+withMatch :: HasCallStack => M b -> E V -> Label -> b -> E (Mode, Known, CG Code)
 withMatch m suc lsuc b = do
   lfail <- newLabel
   st <- get
   let env = env_ st
+      cenv = M.filter (\en -> cv_ en == Con) env
       sfail = cGoto "fail" lfail
-      ((mode, matcher), st') = runState (m b sfail) (st{ env_ = mempty })
+      ((mode, matcher), st') = runState (m b sfail) (st{ env_ = cenv })
       env' = env_ st'
       st_match = (st `oldNew` st'){ env_ = env' <> env }
   put st_match
@@ -331,7 +354,7 @@ withMatch m suc lsuc b = do
     _ -> do
       (kn, rhs) <- suc
       pure (mode, kn, do
-        state $ runState matcher
+        matcher
         c <- rhs
         stmt (cGoto "succ" lsuc)
         when (mode /= AlwaysSucceeds) $
@@ -349,8 +372,8 @@ matches' [] _ _ = error "Empty pats; shouldn't happen!"
 matches' ps kns _ | length ps /= length kns =
   matchError (span ps) ("Pat len mismatch "++showsPp ps++" and "++show (length kns))
 matches' ps kns sfail = do
-  fs <- zipWithM (\p kn -> match' p kn sfail) ps kns
-  pure (foldr (meet . fst) AlwaysSucceeds fs, mapM_ snd fs)
+  fs <- zipWithA (\p kn -> match' p kn sfail) ps kns
+  pure (foldr (meet . fst) AlwaysSucceeds fs, traverse_ snd fs)
 
 -- Match Pat with name in Env and yield fresh Env.
 -- Falls through on match, "break" on match fail.
@@ -375,23 +398,27 @@ match' c@(Const _ (EString _)) (_, nm) sfail = mayFail $
 match' c@(Const _ _) (_, nm) sfail = mayFail $ do
   stmt $ cIf (hsep [pp c, "!=", pp nm]) sfail
 match' (Block (_, ds)) (_, name) sfail = do
-  ms <- mapM (\d -> matchField name d sfail) ds
-  pure (foldr (meet . fst) AlwaysSucceeds ms, mapM_ snd ms)
+  ms <- traverse (\d -> matchField name d sfail) ds
+  pure (foldr (meet . fst) AlwaysSucceeds ms, traverse_ snd ms)
 match' (App _ (Id s _ Con con) as) (kn, nm) cfail = matchCon s con as (kn, nm) cfail
 match' p _ _ = matchError (span p) ("Unrecognized pattern "++showPp p)
 
-matchCon :: Span -> Var -> [Pat] -> M (Known, Name)
+matchCon :: HasCallStack => Span -> Var -> [Pat] -> M (Known, Name)
 matchCon s con ps (_, nm) sfail = do
-  cname <- funName s con
-  ns <- mapM (withName . snd . patVar) ps
+  ns <- traverse (withName . snd . patVar) ps
   let kns = (Unknown,) <$> ns
-      ns' = filter ((/= wildPlaceHolder) . snd) $ zip [0..] ns
-  ms <- zipWithM (\p kn -> match' p kn sfail) ps kns
-  pure (foldr (meet . fst) MayFail ms, do
-    mapM_ (decl . cObjDecl . snd) ns'
-    stmt $ cIf ("!" <> cCall "ling_desc_is" [pp cname, pp nm]) sfail
-    mapM_ (\(n, pnm) -> stmt (cObjAssign pnm (cCall "ling_field" [pp nm, int n]))) ns'
-    mapM_ snd ms)
+      ns' = zip [0..] ns
+  ms <- zipWithA (\p kn -> match' p kn sfail) ps kns
+  let kn = foldr (meet . fst) MayFail ms
+  test <- if con == "()" then
+      pure $ cCall "ling_is_tuple" [int (length ps), pp nm]
+    else
+      (\cname -> cCall "ling_desc_is" [pp cname, pp nm]) <$> funName s con
+  pure (kn, do
+    traverse_ (decl . cObjDecl) ns
+    stmt $ cIf ("!" <> test) sfail
+    traverse_ (\(n, pnm) -> stmt (cObjAssign pnm (cCall "ling_field" [pp nm, int n]))) ns'
+    traverse_ snd ms)
 
 matchField :: HasCallStack => Name -> M (Span, Def)
 matchField _ (_, Def (Id _ _ Var _) (Wild _)) _ = alwaysSucceed
@@ -400,19 +427,16 @@ matchField nm (_, Def (Id _ _ Var fn) p) sfail = do
   (m, act) <- match' p (Unknown, fnm) sfail
   pure (m, do
     decl (cObjDecl fnm)
-    stmt $ hsep [ pp fnm, "=", pp nm <> "." <> pp fn <> ";" ]
+    stmt $ hsep [ pp fnm, "=", pp nm <> "." <> pp fn <> semi ]
     act)
 matchField _ (s, p) _ = matchError s ("Illegal struct pattern "++showPp p)
-
-wildPlaceHolder :: Name
-wildPlaceHolder = N "_" "_" (-1)
 
 data BestVarKind = Wildcard | New | Orig deriving (Eq, Ord, Show)
 
 -- Return best var to drive name for pattern.
 patVar :: Pat -> (BestVarKind, Var)
 patVar (Paren _ p) = patVar p
-patVar (Wild _) = (Wildcard, "pat")
+patVar (Wild _) = (Wildcard, "wpat")
 patVar (Id _ _ Var var) = (Orig, var)
 patVar _ = (New, "pat")
 
@@ -427,7 +451,7 @@ clauseVars cs = snd <$> foldr1 (zipWith bestPatVar) (fmap (fmap patVar . fst) cs
 
 -- cont helpers.
 -- This one assumes that e yields an Exp directly and handles other conts.
-cont :: Cont -> EI Code -> EI Code
+cont :: Cont -> CG Code -> CG Code
 cont Exp e = e
 cont (Bind nm) e = do
   c <- e
@@ -442,7 +466,8 @@ cont Return e = do
 contBind :: Var -> EV -> EV
 contBind v a Exp = do
   t <- withName v
-  a (Bind t)
+  (kn, act) <- a (Bind t)
+  pure (kn, decl (cObjDecl t) >> act)
 contBind _ a k = a k
 
 -- Helpers for apply
@@ -450,6 +475,7 @@ isKnownValue :: Known -> Bool
 isKnownValue (KnownValue _) = True
 isKnownValue _ = False
 
+-- Note that we've stashed a serialization of the name in the Desc v.
 knownVarArity :: Known -> Maybe (Var, Arity)
 knownVarArity (KnownDesc _ (Desc v a _ _)) = Just (v, a)
 knownVarArity (KnownValue (VDesc (Desc v a _ _))) = Just (v, a)
@@ -459,21 +485,20 @@ knownVarArity _ = Nothing
 apply :: HasCallStack => Span -> EV -> [EV] -> EV
 apply s a as k = do
   (kn, f) <- a Exp
-  kas <- mapM ($ Exp) as
+  kas <- traverse ($ Exp) as
   apply' s kn f kas k
 
-apply' :: HasCallStack => Span -> Known -> EI Code -> [V] -> EV
+apply' :: HasCallStack => Span -> Known -> CG Code -> [V] -> EV
 apply' s kn f kas k =
   case knownVarArity kn of
     Nothing -> pure (Unknown, cont k $ applyUnknown f kas)
-    Just (v, a) -> do
-      nm <- funName s v
+    Just (nm, a) -> do
       applyKnown s nm a kn f kas k
 
-args :: [V] -> EI [Code]
-args = mapM snd
+args :: [V] -> CG [Code]
+args = traverse snd
 
-applyKnown :: HasCallStack => Span -> Name -> Arity -> Known -> EI Code -> [V] -> EV
+applyKnown :: HasCallStack => Span -> Var -> Arity -> Known -> CG Code -> [V] -> EV
 applyKnown s nm a kn f as k
   | a > len = do
     sp <- spanPrefix s <$> expSP
@@ -499,7 +524,7 @@ applyKnown s nm _ kn f as k = do
     applyKnown' sp nm kn f cs)
 
 applyKnown' :: HasCallStack =>
-  String -> Name -> Known -> EI Code -> [Code] -> EI Code
+  String -> Var -> Known -> CG Code -> [Code] -> CG Code
 applyKnown' s nm (KnownValue (VDesc _)) _ as = traceCAp s " known VDesc " nm $ do
   pure $ cCall (funcOf nm) (pp contextArg : as)
 applyKnown' s nm (KnownDesc SameEnv _) _ as = traceCAp s " known SameEnv " nm $ do
@@ -510,7 +535,7 @@ applyKnown' s nm (KnownDesc _ _) f as = traceCAp s " known DiffEnv " nm $ do
 applyKnown' s _ kn _ _ = error (s++" applyKnown non-descy " ++ showPp kn)
 
 pApKnown :: HasCallStack =>
-  String -> Name -> Known -> EI Code -> [Code] -> EI Code
+  String -> Var -> Known -> CG Code -> [Code] -> CG Code
 pApKnown s nm (KnownValue (VDesc _)) _ cs = traceCAp s " pknown VDesc " nm $ do
   pure $ cCall "ling_pap" ([
     pp contextArg, pp nm, int (length cs)] <> cs)
@@ -524,25 +549,23 @@ pApKnown s nm (KnownDesc _ _) f cs = traceCAp s " pKnown DiffEnv " nm $ do
     cCall "ling_field" [c, int 0]] <> cs)
 pApKnown s _ kn _ _ = error (s ++ "non-closure pApKnown "++showPp kn)
 
-valueToCode :: HasCallStack => Span -> Value -> Cont -> E (EI Code)
+valueToCode :: HasCallStack => Span -> Value -> Cont -> E (CG Code)
 valueToCode _ c@(VConst _) k = pure $ cont k $ pure $ pp c
-valueToCode s (VDesc (Desc c _ _ _)) k = do
-  d <- funName s c
-  pure $ cont k (pure $ pp d)
+valueToCode _ (VDesc (Desc c _ _ _)) k = do
+  pure $ cont k (pure $ pp c)
 valueToCode s (VObj (Desc c _ _ _) vs) k = do
-  acts <- mapM (\v -> valueToCode s v Exp) vs
-  d <- funName s c
+  acts <- traverse (\v -> valueToCode s v Exp) vs
   nm <- withName c
   pure $ cont k $ do
     cs <- sequenceA acts
     toplevel $ hang
       (hsep ["static", "const", "ling_obj", pp nm <> "[]", equals]) 2
-      (cCall "LING_OBJ" (pp d : cs))
+      (cArray (pp c : cs) <> semi)
     pure $ pp nm
 valueToCode s v _ = expError s ("Can't convert value to code "++showPp v)
 
 -- Evaluate function and args
-applyUnknown :: HasCallStack => EI Code -> [V] -> EI Code
+applyUnknown :: HasCallStack => CG Code -> [V] -> CG Code
 applyUnknown f as = do
   vs <- args as
   v <- f
@@ -566,7 +589,7 @@ appDisjs s ds kns k = do
         pure $
           (m, kn, do
             r <- act
-            stmt (cReturn (cCall "ling_match_error" [text (show sloc)]))
+            stmt $ cMatchError sloc
             pure r)
   (_, kn, act) <- clause ds (mempty, mempty, unreachable)
   pure (kn, do
@@ -575,6 +598,7 @@ appDisjs s ds kns k = do
     pure r)
 
 eval :: HasCallStack => Exp -> EV
+eval e _ | trace ("eval "++showPp e) False = undefined
 eval (Id s _ _ i) k = do
   en <- findEnv s i
   pure (kn_ en, cont k $ pure $ pp $ n_ en)
@@ -585,11 +609,11 @@ eval (Const s c) k = do
 eval e@(Fn s (_, ds)) k = withDiffEnv $ do
   name <- withName "anon_fn"
   (a, cs) <- mkRhs s ds <$> expSP
-  info <- closed (fv e)
+  info@(~(pack, _, _)) <- closed (fv e)
   (kn, act) <- vClo s name a info cs k
-  pure (kn, vCloDecl name a >> act)
+  pure (kn, vCloDecl name a info >> pack >> act)
 eval (Tuple s es) k = do
-  es' <- mapM (\e -> eval e Exp) es
+  es' <- traverse (\e -> eval e Exp) es
   let
     a = length es'
     d = cDesc "()" a
@@ -618,7 +642,7 @@ evDefs b k =
   case groupDefs b of
     Left es -> do
       sp <- expSP
-      error $ unlines $ (\(s, err) -> spanPrefix s sp <> toString err) <$> es
+      error $ unlines $ (\(~(s, err)) -> spanPrefix s sp <> toString err) <$> es
     Right ds -> evGroups ds k
 
 evGroups :: HasCallStack => [DefGroup] -> EV
@@ -630,44 +654,46 @@ evGroups [Record m] k = do
   pure (Unknown, cont k $
     ms `seq` error "TODO evGroups record")
 evGroups [D (BindExp e)] k = trace "BindExp final" $ locally $ eval e k
-evGroups (D (Data t (_,ds)) : ts) k = trace ("data "++showPp t) $ foldr addCon (evGroups ts k) ds
+evGroups (D (Data t ~(_,ds)) : ts) k = trace ("data "++showPp t) $ foldr addCon (evGroups ts k) ds
 evGroups ts Exp = contBind "block_val" (evGroups ts) Exp
-evGroups (Fns fs:ts) k = trace ("Fns "++show (map (\(_,v,_,_) -> v) fs)) $ withDiffEnv $ fixEnv (evFns fs) (evGroups ts k)
+evGroups (Fns fs:ts) k = trace ("Fns "++show (map (\(~(_,v,_,_)) -> v) fs)) $
+  withDiffEnv $ fixEnv (evFns fs) (evGroups ts k)
 evGroups (D (BindExp e) : ts) k = trace "BindExp" $ do
-  (_, e') <- locally $ eval e Exp
-  (kn, r) <- evGroups ts k
+  ~(_, e') <- locally $ eval e Exp
+  ~(kn, r) <- evGroups ts k
   pure (kn, e' >> r)
 evGroups (D (Def p e) : ts) k = trace ("Def "++showPp p) $ do
   sloc <- spanPrefix (span p) <$> expSP
-  let (_, v) = patVar p
-      matchErr = cReturn (cCall "ling_match_error" [text (show sloc)])
+  let v = snd $ patVar p
+      matchErr = cMatchError sloc
   n <- withName v
-  (ekn, e') <- locally $ eval e (Bind n)
+  ~(ekn, e') <- locally $ eval e (Bind n)
   lsucc <- newLabel
-  (m, kn, act) <- withMatch (match p) (evGroups ts k) lsucc (ekn, n)
+  ~(m, kn, act) <- withMatch (match p) (evGroups ts k) lsucc (ekn, n)
   pure (kn, do
+    decl (cObjDecl n)
     e'
     r <- act
-    case (m, k) of
-      (AlwaysSucceeds, Return) -> pure ()
-      (AlwaysSucceeds, _) -> stmt (cLabel "succ" lsucc)
-      (_, Return) -> stmt matchErr
+    case m of
+      AlwaysSucceeds -> stmt (cLabel "succ" lsucc)
       _ -> stmt matchErr >> stmt (cLabel "succ" lsucc)
     pure r)
 evGroups (g : _) _ = error ("Unexpected group "++showPp g)
 
 -- Bind closures for fs, assumes we're already in a fixed-point env.
-evFns :: HasCallStack => [GroupFun] -> E ([(Var, (Known, Name))], EI ())
+evFns :: HasCallStack => [GroupFun] -> E ([(Var, (Known, Name))], CG ())
 evFns fs = do
-  ci <- closed (fv (Fns fs))
-  let clo (s, v, a, cs) = do
-        n <- withName v
-        (n, a,) <$> vClo s n a ci cs (Bind n)
-  ns <- mapM clo fs
-  let r = [ (v, (k, n)) | (n@(N v _ _), _, (k, _)) <- ns ]
+  named <- traverse (\(~(s, v, a, cs)) -> (, s, v, a, cs) <$> withName v) fs
+  ci@(~(mkEnv, _, _)) <- closed (fv (Fns fs))
+  let clo ~(n, s, v, a, cs) = do
+        n' <- if hasEnv ci then withName (v<>"_IMP") else pure n
+        (\(~(kn,act)) -> (n',a,kn,act)) <$> vClo s n' a ci cs (Bind n)
+  ns <- traverse clo named
+  let r = zipWith (\(~(n, _, v, _, _)) (~(_, _, kn, _)) -> (v, (kn, n))) named ns
   pure (r, do
-    mapM_ (\(n, a, _) -> vCloDecl n a) ns
-    mapM_ (\(_, _, (_, act)) -> act) ns)
+    traverse_ (\(~(n', a, _, _)) -> vCloDecl n' a ci) ns
+    traverse_ (\(~(_, _, _, act)) -> act) ns
+    mkEnv)
 
 -- Convert local env into closure env.  Returns:
 -- Statement to pack the closure into closure argument
@@ -677,71 +703,108 @@ evFns fs = do
 -- a program transformation to hoist them.
 -- TODO: We handle free peer functions badly and require
 -- full closures to live in the env.
-type CloInfo = (Code, Maybe Name, E V -> E V)
+type CloInfo = (CG (), Maybe Name, E V -> E V)
+
 closed :: Set Var -> E CloInfo
+closed vs | trace ("closed "++show vs) $ False = undefined
 closed vs = do
   env <- gets env_
   earg <- withClone envArg
-  let -- Figure out what vars we're closing over.
-    env' = M.filterWithKey (\k _ -> k `S.member` vs) env
+  let
+    -- Figure out what vars we're closing over.  Include all constructors
+    -- so that matching can resolve them (they're flagged as global since
+    -- they have no fvs)
+    env' = M.filterWithKey (\k en -> cv_ en == Con || k `S.member` vs) env
     inClo = M.filter (\en -> vgl_ en /= Global) env'
     cloNames = n_ <$> M.elems inClo
-    mkEnv = cCall "ling_tuple" (pp contextArg : int (length inClo) : (pp <$> cloNames))
-    declEnv = cObjDeclAssign earg mkEnv
+    declEnv = do
+      decl $ cObjDeclAssign earg $
+        cCall "ling_mk_env" [pp contextArg, int (length inClo)]
+      stmt $
+        cCall "ling_fill_env" (int (length inClo) : pp earg : (pp <$> cloNames)) <> semi
     unpackEnv =
       [ cObjDeclAssign n (cCall "ling_field" [pp envArg, int i]) |
-        (n, i) <- zip cloNames [0..]]
+        ~(n, i) <- zip cloNames [0..]]
     wrapper :: E V -> E V
     wrapper act = withEnv env' $ do
-      (kn, body) <- act
+      ~(kn, body) <- act
       pure $
         (kn, do
-          mapM_ decl unpackEnv
+          traverse_ decl unpackEnv
           body)
-  if null cloNames then
-    pure (mempty, Nothing, withEnv env')
-  else
-    pure (declEnv, Just earg, wrapper)
+  (\(~(a,b,c)) -> (a,b,c)) <$>
+    if null cloNames then
+      pure (pure (), Nothing, withEnv env')
+    else
+      pure (declEnv, Just earg, wrapper)
+
+hasEnv :: CloInfo -> Bool
+hasEnv (_, Nothing, _) = False
+hasEnv _ = True
 
 -- Add the global declarations required to build a closure.
 -- We need to do this for all functions in a group before defining
 -- any function in the group.  For this reason we generate code eagerly.
-vCloDecl :: HasCallStack => Name -> Arity -> EI ()
-vCloDecl f n = do
-  mkFnDecl f n
-  mkDesc f n
+vCloDecl :: HasCallStack => Name -> Arity -> CloInfo -> CG ()
+vCloDecl f n ci = do
+  let n' | hasEnv ci = n + 1
+         | otherwise = n
+  mkFnDecl f n'
+  mkDesc f n'
 
+noFold :: CloFun E
+noFold = CloFun $ \_ -> error "Can't fold fns"
 
 vClo :: HasCallStack => Span -> Name -> Arity -> CloInfo -> [Clause] -> EV
-vClo s f@(N i _ _) n (pack, envName, unpackAndBind) cs k = do
-  as <- mapM withName (clauseVars cs)
-  (_, body) <- unpackAndBind $ locally $ appDisjs s cs ((Unknown,) <$> as) Return
-  let d = Desc i n NoFold (CloFun $ \_ -> error "Can't fold fns")
-      func = mkFn f as body
-      closure en k' = cont k' $ do
-        stmt pack
-        pure $ cCall "ling_pap" [pp contextArg, pp f, int 1, pp en]
-  case envName of
-    Nothing -> pure (KnownValue $ VDesc d, func >> (cont k $ pure $ pp f))
-    Just en -> contBind "closure" (\k' -> pure (KnownDesc DiffEnv d, closure en k')) k
+vClo _ f _ _ _ _ | trace ("vClo "++showPp f) False = undefined
+vClo s f n ci@(_, envName, unpackAndBind) cs k = do
+  let
+    d = Desc (toVar f) n NoFold noFold
+    kn | hasEnv ci = KnownDesc DiffEnv $ d
+       | otherwise = KnownValue $ VDesc $ d
+  (kn,) <$> do
+    as <- traverse withName (clauseVars cs)
+    (_, body) <- unpackAndBind $ locally $ appDisjs s cs ((Unknown,) <$> as) Return
+    let as' | hasEnv ci = envArg : as
+            | otherwise = as
+        func = mkFn f as' body
+        closure en k' = cont k' $ do
+          pure $ cCall "ling_pap" [pp contextArg, pp f, int 1, pp en]
+    case (envName, k) of
+      (Nothing, Bind f')
+        | f == f' -> pure (func >> pure (pp f))
+        | otherwise -> pure $ do
+            func
+            decl (cObjDecl f')
+            stmt (cObjAssign f' (pp f))
+            pure (pp f')
+      (Nothing, _) -> pure (func >> (cont k $ pure $ pp f))
+      (Just en, _) -> snd <$> contBind "closure" (\k' -> pure $ (kn, func >> closure en k')) k
 
 -- Store arity information about constructors to env
 addCon :: HasCallStack => (Span, Def) -> E V -> E V
-addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) = conBinding c (cDesc c (typeArity t))
-addCon (s, d) = const (expError s ("addCon: not a constructor def "++showPp d))
+addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) k = do
+  nm <- withName c
+  conBinding c nm (cDesc (toVar nm) (typeArity t)) k
+addCon (s, d) _ = expError s ("addCon: not a constructor def "++showPp d)
 
 compileTop :: HasCallStack => (SpanPos, Defs) -> Code
 compileTop (sp, ds) = do
   let st0 = St { sp_ = sp, tn_ = mempty, nlbl_ = 0,
                  gl_ = Global, env_ = mempty }
       in0 = Inner { fns_ = mempty, decls_ = mempty, stmts_ = mempty }
-      ((_, EI act), _) = runExp (expand env0 >> evDefs ds Return) st0
+      ((_, act), _) = (`runExp` st0) $ do
+        expand env0
+        _ <- withName "initialize"
+        evDefs ds Return
       (_, inn) = runState act in0
   vcat [
+      "#include \"lingrts.h\"" $*$
+      decls_ inn $*$
       fns_ inn,
       "",
-      hsep ["int", cCall "main" ["int argc", "char *argv[]"], lbrace],
-      nest 2 (vcat [decls_ inn, "", stmts_ inn]),
+      hsep ["ling_obj", cCall "initialize" [pp contextArg], lbrace],
+      nest 2 $ stmts_ inn,
       rbrace
     ]
 
@@ -752,5 +815,5 @@ expand e = do
         error ("Name collision in initial environment on "++show v)
       oneBinding (i, v) = do
         n <- withName i
-        modify $ bindEnvWith collide i (KnownValue v, n)
-  mapM_ oneBinding es
+        modify $ bindEnvWith collide i (Var, KnownValue v, n)
+  traverse_ oneBinding es
