@@ -192,7 +192,7 @@ bindEnvWith c i (cv, kn, nm) st =
   st{ env_ = M.insertWith c i (En cv kn (gl_ st) nm) (env_ st) }
 
 lookupEnv :: HasCallStack => Span -> Var -> St -> Entry
-lookupEnv s i ~(St {env_ = env, sp_ = sp}) =
+lookupEnv s i (St {env_ = env, sp_ = sp}) =
   fromMaybe (spanError s ("Unbound variable "++toString i) sp) $
     M.lookup i env
 
@@ -271,14 +271,14 @@ mkDesc n@(N v _ _) a =
 fixEnv :: E ([(Var, (Known, Name))], CG ()) -> E V -> E V
 fixEnv a inner = do
   st <- get
-  let ~(~(vs, act), st') = runExp (withEnv env' a) st
+  let ((vs, act), st') = runExp (withEnv env' a) st
       gl = gl_ st
       env = env_ st
-      env_i = M.fromList [ (i, En { cv_ = Var, kn_ = kn, vgl_ = gl, n_ = n }) | ~(i, ~(kn, n)) <- vs ]
+      env_i = M.fromList [ (i, En { cv_ = Var, kn_ = kn, vgl_ = gl, n_ = n }) | (i, (kn, n)) <- vs ]
       env' = fmap (\en -> lazyEn $ en { kn_ = sameEnv (kn_ en) }) env_i <> env
       env'' =  env_i <> env
   put (st `oldNew` st')
-  ~(k, act') <- withEnv env'' inner
+  (k, act') <- withEnv env'' inner
   pure (k, act >> act')
 
 -- Handles a *constant* binding (constructor def)
@@ -608,7 +608,7 @@ eval (Const s c) k = do
 eval e@(Fn s (_, ds)) k = withDiffEnv $ do
   name <- withName "anon_fn"
   (a, cs) <- mkRhs s ds <$> expSP
-  info@(~(pack, _, _)) <- closed (fv e)
+  info@(pack, _, _) <- closed (fv e)
   (kn, act) <- vClo s name a info cs k
   pure (kn, vCloDecl name a info >> pack >> act)
 eval (Tuple s es) k = do
@@ -641,7 +641,7 @@ evDefs b k =
   case groupDefs b of
     Left es -> do
       sp <- expSP
-      error $ unlines $ (\(~(s, err)) -> spanPrefix s sp <> toString err) <$> es
+      error $ unlines $ (\(s, err) -> spanPrefix s sp <> toString err) <$> es
     Right ds -> evGroups ds k
 
 evGroups :: HasCallStack => [DefGroup] -> EV
@@ -654,24 +654,24 @@ evGroups [Record m] k = do
     ms `seq` error "TODO evGroups record")
 evGroups [D (BindExp e)] k =
   locally $ eval e k
-evGroups (D (Data t ~(_,ds)) : ts) k =
+evGroups (D (Data _ (_,ds)) : ts) k =
   foldr addCon (evGroups ts k) ds
 evGroups ts Exp =
   contBind "block_val" (evGroups ts) Exp
 evGroups (Fns fs:ts) k =
   withDiffEnv $ fixEnv (evFns fs) (evGroups ts k)
 evGroups (D (BindExp e) : ts) k = do
-  ~(_, e') <- locally $ eval e Exp
-  ~(kn, r) <- evGroups ts k
+  (_, e') <- locally $ eval e Exp
+  (kn, r) <- evGroups ts k
   pure (kn, e' >> r)
 evGroups (D (Def p e) : ts) k = do
   sloc <- spanPrefix (span p) <$> expSP
   let v = snd $ patVar p
       matchErr = cMatchError sloc
   n <- withName v
-  ~(ekn, e') <- locally $ eval e (Bind n)
+  (ekn, e') <- locally $ eval e (Bind n)
   lsucc <- newLabel
-  ~(m, kn, act) <- withMatch (match p) (evGroups ts k) lsucc (ekn, n)
+  (m, kn, act) <- withMatch (match p) (evGroups ts k) lsucc (ekn, n)
   pure (kn, do
     decl (cObjDecl n)
     e'
@@ -685,16 +685,16 @@ evGroups (g : _) _ = error ("Unexpected group "++showPp g)
 -- Bind closures for fs, assumes we're already in a fixed-point env.
 evFns :: HasCallStack => [GroupFun] -> E ([(Var, (Known, Name))], CG ())
 evFns fs = do
-  named <- traverse (\(~(s, v, a, cs)) -> (, s, v, a, cs) <$> withName v) fs
-  ci@(~(mkEnv, _, _)) <- closed (fv (Fns fs))
-  let clo ~(n, s, v, a, cs) = do
+  named <- traverse (\(s, v, a, cs) -> (, s, v, a, cs) <$> withName v) fs
+  ci@(mkEnv, _, _) <- closed (fv (Fns fs))
+  let clo (n, s, v, a, cs) = do
         n' <- if hasEnv ci then withName (v<>"_IMP") else pure n
-        (\(~(kn,act)) -> (n',a,kn,act)) <$> vClo s n' a ci cs (Bind n)
+        (\(kn,act) -> (n',a,kn,act)) <$> vClo s n' a ci cs (Bind n)
   ns <- traverse clo named
-  let r = zipWith (\(~(n, _, v, _, _)) (~(_, _, kn, _)) -> (v, (kn, n))) named ns
+  let r = zipWith (\(n, _, v, _, _) (_, _, kn, _) -> (v, (kn, n))) named ns
   pure (r, do
-    traverse_ (\(~(n', a, _, _)) -> vCloDecl n' a ci) ns
-    traverse_ (\(~(_, _, _, act)) -> act) ns
+    traverse_ (\(n', a, _, _) -> vCloDecl n' a ci) ns
+    traverse_ (\(_, _, _, act) -> act) ns
     mkEnv)
 
 -- Convert local env into closure env.  Returns:
@@ -725,15 +725,15 @@ closed vs = do
         cCall "ling_fill_env" (int (length inClo) : pp earg : (pp <$> cloNames)) <> semi
     unpackEnv =
       [ cObjDeclAssign n (cCall "ling_field" [pp envArg, int i]) |
-        ~(n, i) <- zip cloNames [0..]]
+        (n, i) <- zip cloNames [0..]]
     wrapper :: E V -> E V
     wrapper act = withEnv env' $ do
-      ~(kn, body) <- act
+      (kn, body) <- act
       pure $
         (kn, do
           traverse_ decl unpackEnv
           body)
-  (\(~(a,b,c)) -> (a,b,c)) <$>
+  (\(~(a,b,c)) -> (a,b,c)) <$>  -- NOTE: required for <<loop>> prevention!
     if null cloNames then
       pure (pure (), Nothing, withEnv env')
     else
