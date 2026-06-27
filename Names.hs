@@ -18,6 +18,22 @@ import Data.Set as S
 import Numeric(showHex)
 import qualified Text.PrettyPrint as PP
 
+{-
+## Variable conventions
+
+We preserve top-level variable names where possible, adding trailing _
+for collisions (including C keywords and RTS functions).  We use a
+single underscore for C keywords.  Internal variable names are
+numerically mangled.  Primes are _P.  Trailing digits in any name
+permit selection of a different set of trailing digits for the mangling.
+
+Operator mangling:
+_0p_[mangled characters]
+By and large there's a single alphabetic character for each valid low-
+ascii operator character.  For unicode we use decimal expansion.
+
+-}
+
 -- CodeGen names, as opposed to the Variables and Identifiers in the input language.
 type Mangled = ByteString
 

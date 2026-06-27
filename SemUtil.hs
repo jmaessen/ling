@@ -1,5 +1,5 @@
 module SemUtil(
-  cDesc, cCon,
+  conDesc, conClo,
   patToPats, patsToPat, typeArity,
   toDisj, mkRhs) where
 import AST
@@ -9,15 +9,15 @@ import Parse
 import Value
 
 -- Constructor descriptor
-cDesc :: Applicative m => ConName -> Arity -> Desc m
-cDesc v i = d where
+conDesc :: Applicative m => ConName -> Arity -> Desc m
+conDesc v i = d where
   d = Desc v i Fold (CloFun cf)
   cf | i == 0 = error ("Applying 0-ary "++toString v)
      | otherwise = pure . VObj d
 
 -- Constructor closure
-cCon :: Applicative m => ConName -> Arity -> Val m
-cCon v i = VDesc (cDesc v i)
+conClo :: Applicative m => ConName -> Arity -> Val m
+conClo v i = VDesc (conDesc v i)
 
 -- Arity based on arrow counting
 typeArity :: HasCallStack => Exp -> Arity

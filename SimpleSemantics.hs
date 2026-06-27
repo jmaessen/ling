@@ -218,7 +218,7 @@ eval e@(Fn s (_, ds)) = do
   (a, cs) <- mkRhs s ds <$> expSP
   vClo s "<anon>" a (fv e) cs
 eval (Tuple _ es) = do
-  let d = cDesc "()" (length es)
+  let d = conDesc "()" (length es)
   VObj d <$> args (fmap eval es)
 eval (Case s e (_,es)) = do
   v <- eval e
@@ -271,7 +271,7 @@ vClo s f n vs ds = do
 
 -- Store arity information about constructors to env
 addCon :: HasCallStack => (Span, Def) -> E Value -> E Value
-addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) = conBinding c (cCon c (typeArity t))
+addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) = conBinding c (conClo c (typeArity t))
 addCon (s, d) = const (expError s ("addCon: not a constructor def "++showPp d))
 
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value

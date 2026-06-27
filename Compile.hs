@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings, ApplicativeDo, PatternSynonyms, LambdaCase, TypeFamilies #-}
 module Compile(compileTop) where
 import AST
+import CUtil
 import Names
 import Parse(SpanPos, spanError, spanPrefix)
 import Primitive
@@ -21,20 +22,6 @@ import GHC.Stack(HasCallStack)
 import Text.PrettyPrint hiding ((<>), Mode)
 import Prelude hiding (span)
 
-infixl 5 $*$
-
-{-
-## Variable conventions
-
-We preserve top-level variable names where possible.  We use a single underscore for C keywords.
-Internal variable names are numerically mangled.  Primes are _P.
-
-Operator mangling:
-_0p_[mangled characters]
-What's the mangled character mapping?  Alphabetic, then fall back to _decimal?
-
--}
-
 trace_match :: Bool
 trace_match = False
 
@@ -53,48 +40,6 @@ traceCAp s m nm b | trace_app_compile = do
   trace (s++m++showPp nm) b
 traceCAp _ _ _  b = b
 
--- C stuff
-cCall :: Code -> [Code] -> Code
-cCall f xs = f <> parens (fsep $ punctuate comma xs)
-
-cObjDeclAssign :: Name -> Code -> Code
-cObjDeclAssign v code = hang ("ling_obj" <+> pp v <+> equals) 2 (code <> semi)
-
-cObjDecl :: Name -> Code
-cObjDecl v = "ling_obj" <+> (pp v <> semi)
-
-cObjAssign :: Name -> Code -> Code
-cObjAssign v code = hang (pp v <+> equals) 2 (code <> semi)
-
-cFuncDecl :: Name -> Int -> Code
-cFuncDecl n a =
-  cCall ("ling_obj" <+> funcOf n) ("ling_context" : replicate a "ling_obj")
-
-cFuncHeader :: Name -> [Name] -> Code
-cFuncHeader n as = do
-  let arg a = "ling_obj" <+> pp a
-      ps = ("ling_context" <+> ("*" <> pp contextArg)) : fmap arg as
-  cCall ("ling_obj" <+> funcOf n) ps
-
-cReturn :: Code -> Code
-cReturn c = hang "return" 2 (c <> semi)
-
-cLabel :: Doc -> Label -> Code
-cLabel s l = nest (-1) (s <> integer l <> colon)
-
-cGoto :: Doc -> Label -> Code
-cGoto s l = "goto" <+> (s <> integer l <> semi)
-
-cArray :: [Code] -> Code
-cArray cs = braces (nest 2 $ fsep $ punctuate comma cs)
-
--- One-sided if statement
-cIf :: Code -> Code -> Code
-cIf p t = sep [ hsep [ "if", parens p, lbrace ], nest 2 t, rbrace ]
-
-cMatchError :: String -> Code
-cMatchError sloc = cReturn (cCall "ling_match_error" [text (show sloc)])
-
 -- Naming and Environments
 
 data Entry = En {
@@ -111,7 +56,6 @@ lazyEn e = En { cv_ = cv_ e, kn_ = kn_ e, vgl_ = vgl_ e, n_ = n_ e }
 -- Closures, Descriptors, and Values
 type Value = Val E
 type Known = Knw E
-type Code = Doc
 
 -- Utilities not worth an import
 fromMaybe :: a -> Maybe a -> a
@@ -120,16 +64,8 @@ fromMaybe d = maybe d id
 zipWithA :: Applicative m => (a -> b -> m c) -> [a] -> [b] -> m [c]
 zipWithA f as bs = sequenceA (zipWith f as bs)
 
--- Vertical separation with blank space
-($*$) :: Doc -> Doc -> Doc
-a $*$ b
-  | isEmpty a = b
-  | isEmpty b = a
-  | otherwise = a $$ "" $$ b
-
 -- Evaluation (environment) monads
 data Cont = Bind Name | Return | Exp deriving (Eq, Show)
-type Label = Integer
 data St = St {
   -- Never changes
   sp_ :: SpanPos,
@@ -260,10 +196,7 @@ mkFn n as body = do
 
 mkDesc :: Name -> Int -> CG ()
 mkDesc n@(N v _ _) a =
-  toplevel $ sep [
-    hsep ["const", "ling_obj", (pp n)<>"[]", "=", lbrace],
-    nest 2 $ fsep (punctuate comma [pp n, int a, "&"<>funcOf n, text (show v)]),
-    rbrace]
+  toplevel $ cDesc (pp n) v a
 
 -- Takes a computation that computes bindings and evaluates
 -- it in an env containing those bindings, then evaluates
@@ -615,7 +548,7 @@ eval (Tuple s es) k = do
   es' <- traverse (\e -> eval e Exp) es
   let
     a = length es'
-    d = cDesc "()" a
+    d = conDesc "()" a
     kn | all (isKnownValue . fst) es' =
          KnownValue (VObj d [ v | (KnownValue v, _) <- es' ])
        | null es = KnownValue (VDesc d)
@@ -785,7 +718,7 @@ vClo s f n ci@(_, envName, unpackAndBind) cs k = do
 addCon :: HasCallStack => (Span, Def) -> E V -> E V
 addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) k = do
   nm <- withName c
-  conBinding c nm (cDesc (toVar nm) (typeArity t)) k
+  conBinding c nm (conDesc (toVar nm) (typeArity t)) k
 addCon (s, d) _ = expError s ("addCon: not a constructor def "++showPp d)
 
 compileTop :: HasCallStack => (SpanPos, Defs) -> Code

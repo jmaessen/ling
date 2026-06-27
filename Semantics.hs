@@ -486,7 +486,7 @@ eval e@(Fn s (_, ds)) = withDiffEnv $ do
   vClo s "<anon>" a (fv e) cs
 eval (Tuple _ es) = do
   es' <- traverse eval es
-  let d = cDesc "()" (length es')
+  let d = conDesc "()" (length es')
       kn | null es = KnownValue (VDesc d)
          | otherwise = KnownDesc DiffEnv d
       vs = fmap snd es'
@@ -555,7 +555,7 @@ vClo s f n vs ds = do
 
 -- Store arity information about constructors to env
 addCon :: HasCallStack => (Span, Def) -> EV -> EV
-addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) = conBinding c (cCon c (typeArity t))
+addCon (_, BindExp (Asc _ (Id _ _ Con c) t)) = conBinding c (conClo c (typeArity t))
 addCon (s, d) = const (expError s ("addCon: not a constructor def "++showPp d))
 
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value

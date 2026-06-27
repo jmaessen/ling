@@ -114,6 +114,9 @@ fpe = unpar . fp
 class PP t where
   pp :: t -> Doc
 
+instance PP Doc where
+  pp = id
+
 instance PP ByteString where
   pp = text . toString
 

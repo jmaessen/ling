@@ -15,14 +15,14 @@ Ordering : Type = data { LT; EQ; GT }
 Integer : Type
 String : Type
 
-(+) : Int -> Int -> Int = prim 2 "intAdd"
-(-) : Int -> Int -> Int = prim 2 "intSub"
-(<=) : Int -> Int -> Bool = prim 2 "intLE"
-(==) : Int -> Int -> Bool = prim 2 "intEq"
+(+) : Int -> Int -> Int = intAdd
+(-) : Int -> Int -> Int = intSub
+(<=) : Int -> Int -> Bool = intLE
+(==) : Int -> Int -> Bool = intEq
 
-strConcat : [String] -> String = prim 1 "strConcat"
-putStr : String -> () = prim 1 "putStr"
-intToStr : int -> String = prim 1 "intToStr"
+// strConcat : [String] -> String = prim 1 "strConcat"
+// putStr : String -> () = prim 1 "putStr"
+// intToStr : int -> String = prim 1 "intToStr"
 
 True || _ = True
 _ || b = b
