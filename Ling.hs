@@ -2,10 +2,12 @@ module Ling where
 import AST
 import Compile
 import Desugar
-import GHC.Stack(HasCallStack)
+import qualified GenTuple
 import Parse
 import Semantics
 import qualified SimpleSemantics as Simple
+
+import GHC.Stack(HasCallStack)
 import System.Environment(getArgs)
 
 data What
@@ -17,6 +19,7 @@ data What
   | FParen
   | Desugar
   | All
+  | GenTuple
   deriving (Show, Eq)
 
 args :: [String] -> (What, [String])
@@ -28,6 +31,7 @@ args ("--paren" : as) = (FParen, as)
 args ("--desugar" : as) = (Desugar, as)
 args ("-C" : as) = (Compile, as)
 args ("--all" : as) = (All, as)
+args ("--gen-tuple" : as) = (GenTuple, as)
 args (a:as) = (a:) <$> args as
 args [] = (Go, [])
 
@@ -42,6 +46,7 @@ doit what fs =
     FParen -> mapM_ (print . pp . fullParen . snd) $ fs
     Desugar -> mapM_ (print . pp . fullParen . snd . desugar . validate) $ fs
     All -> doit Pp fs >> doit Desugar fs >> doit Simple fs >> doit Go fs >> doit Compile fs
+    GenTuple -> GenTuple.gen
 
 main :: HasCallStack => IO ()
 main = do

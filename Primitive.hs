@@ -4,6 +4,7 @@ import AST(Arity, Constant(..), Var, showPp, showsPp)
 import Value
 
 import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
 import Data.ByteString.UTF8(fromString, toString)
 import Data.Map as M hiding (foldl)
 import Debug.Trace(trace)
@@ -39,34 +40,39 @@ valToInt :: HasCallStack => Val m -> Integer
 valToInt (VConst (EInt i)) = i
 valToInt v = error ("valToInt: not an int "++showPp v)
 
-getPrim :: (HasCallStack, Applicative m) => [Val m] -> Val m
-getPrim [n, v] =
-  case M.lookup (valToString v) env0 of
-    Just r@(VDesc (Desc _ n' _ _))
-      | fromInteger (valToInt n) == n' -> r
-      | otherwise ->
-        error ("Arity mismatch on prim "++showPp v++" registered as "++show n'++" asked for "++showPp n)
-    _ -> error ("Bad prim "++showPp v)
-getPrim as = error ("Bad args to prim "++showPp as)
-
 env0 :: Applicative m => Map Var (Val m)
 env0 = foldl (\env p -> uncurry M.insert (mkPrim p) env) mempty [
-  ("prim", 2, getPrim),
   ("intAdd", 2, i2 (VConst . EInt) (+)),
   ("intSub", 2, i2 (VConst . EInt) (-)),
+  ("intMul", 2, i2 (VConst . EInt) (*)),
+  ("intDiv", 2, i2 (VConst . EInt) quot),
+  ("intMod", 2, i2 (VConst . EInt) rem),
   ("intEq", 2, i2 vBool (==)),
+  ("intNE", 2, i2 vBool (/=)),
+  ("intLt", 2, i2 vBool (<)),
   ("intLE", 2, i2 vBool (<=)),
+  ("intGt", 2, i2 vBool (>)),
+  ("intGE", 2, i2 vBool (>=)),
   ("strAppend", 2, \case
       [VConst (EString a), VConst (EString b)] -> VConst (EString (a <> b))
       vs -> error ("strAppend "++showsPp vs)
   ),
-  ("putStr", 1, \case
-      [v] -> trace (toString (valToString v)) (VCon0 "()") -- total hack, but "safe"
-      vs -> error ("putStr "++showsPp vs)
-  ),
-  ("strConcat", 1, strConcat),
+  ("strAppendByte", 2, \case
+      [VConst (EString a), VConst (EChar b)] -> VConst (EString (a <> b))),
+  ("strLength", 1, \case [VConst (EString a)] ->
+                           VConst (EInt (fromIntegral (BS.length a)))),
   ("intToStr", 1, \case
       [v] -> VConst $ EString $ fromString $ show $ valToInt v
       vs -> error ("intToStr "++showsPp vs)
+  ),
+  ("byteAt", 2, \case [VConst (EString a), VConst (EInt b)] ->
+                        VConst (EInt (fromIntegral (a `BS.index` (fromIntegral b))))),
+  ("strEq", 2, \case [VConst (EString a), VConst (EString b)] -> vBool (a == b)),
+  ("substr", 3, \case [VConst (EString a), VConst (EInt start), VConst (EInt len)] ->
+                        VConst (EString (BS.take (fromInteger len) $ BS.drop (fromInteger start) a))),
+  ("strConcat", 1, strConcat),
+  ("putStr", 1, \case
+      [v] -> trace (toString (valToString v)) (VCon0 "()") -- total hack, but "safe"
+      vs -> error ("putStr "++showsPp vs)
   )
   ]

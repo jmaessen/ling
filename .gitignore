@@ -6,6 +6,7 @@
 *.p_hi
 *.p_o
 ling
+lingrts-gen.c
 
 # Cabal / Stack output
 dist/
