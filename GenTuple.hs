@@ -7,9 +7,12 @@ import Text.PrettyPrint hiding ((<>))
 -- Generate C code for tuple and PAp descriptors.
 -- Includes both interface and implementation.
 
+noFunc :: Code
+noFunc = "NULL"
+
 genTupleDesc :: Int -> Doc
 genTupleDesc n =
-  cArray ["ling_tuples["<>int n<>"]", int n, "NULL", text $ show $ name n]
+  cCall "LING_MK_DESC" ["ling_tuples["<>int n<>"]", int n, noFunc, text $ show $ name n]
     where name 0 = "()"
           name 1 = "(_,)"
           name _ = "(" <> replicate (n-1) ',' <> ")"
@@ -17,21 +20,21 @@ genTupleDesc n =
 genTuples :: Int -> Doc
 genTuples n =
   sep [
-    hsep ["const", "ling_desc", "ling_tuples["<>int (n+1)<>"]", lbrace],
+    hsep ["const", "ling_desc", "ling_tuples["<>int (n+1)<>"]", equals, lbrace],
     cCommas (fmap genTupleDesc [0..n]),
     rbrace <> semi ]
 
 genPApDesc :: Int -> Doc
 genPApDesc n =
-  cArray ["ling_pAps[" <> int (n-1) <> "]",
-          int n, "NULL", text $ show ("pAp" <> show n)]
+  cCall "LING_MK_DESC" ["ling_pAps[0][" <> int (n-1) <> "]",
+                        int (n + 1), noFunc, text $ show ("pAp" <> show n)]
 
 genPAps :: Int -> Doc
 genPAps n =
   sep [
-    hsep ["const", "ling_desc", "ling_pAps["<>int n<>"]", lbrace],
+    hsep ["const", "ling_desc", "ling_pAps[1]["<>int n<>"]", equals, lbrace, lbrace],
     nest 2 $ fsep $ punctuate comma (fmap genPApDesc [1..n]),
-    rbrace <> semi ]
+    rbrace <> rbrace <> semi ]
 
 genApply :: Int -> Doc
 genApply n = do
@@ -40,35 +43,35 @@ genApply n = do
       "ling_context" <+> ("*" <> pp contextArg),
       "ling_obj" <+> "clo",
       "int" <+> "nargs",
-      "ling_obj" <+> "*args_in"]
+      "const ling_obj" <+> "*args_in"]
     arm k = nest 4 $ vcat [
       hsep["case", int k, colon],
       nest 2 $ vcat[
-        hcat[
-          "clo = (*f)(",
-          cCommas (pp contextArg : ((\i -> hcat ["args[", int i, rbrack]) <$> [1..k])),
-          rparen],
+        sep [
+          "clo =",
+          nest 2 $ sep[
+            "(*(ling_obj (*)("<>cCommas ("ling_context *" : replicate k "ling_obj")<>"))f)",
+            parens (cCommas (pp contextArg : ((\i -> hcat ["args[", int i, rbrack]) <$> [1..k])))<>semi]],
         "break;" ]]
     body = vcat [
-      "int pap_args;",
-      "ling_obj *args = args_in;",
+      "const ling_obj *args = args_in;",
       "while (nargs > 0) {",
-      "  ling_obj *clo_desc = clo[0];",
+      "  const ling_obj *clo_desc = clo.ref[0].ref;",
       -- Note: Relies on ling_pAps being a sized array to compute arity without lookup.
-      "  if (ling_pAps <= clo_desc && clo_desc < ling_pAps + 1) {",
-      "    int pap_arity = 1 + ((ling_desc *)clo_desc - (&ling_pAps[0])) : 0;",
-      "    ling_obj *new_args = calloc((nargs + pap_arity) * sizeof(ling_obj));",
-      "    memcpy(new_args, clo + 2, pap_args * sizeof(ling_obj));",
+      "  if (&ling_pAps[0][0][0] <= clo_desc && clo_desc < &ling_pAps[1][0][0]) {",
+      "    int pap_arity = 1 + ((ling_desc *)clo_desc - (&ling_pAps[0][0]));",
+      "    ling_obj *new_args = alloca((nargs + pap_arity) * sizeof(ling_obj));",
+      "    memcpy(new_args, clo.ref + 2, pap_arity * sizeof(ling_obj));",
       "    memcpy(new_args, args, nargs * sizeof(ling_obj));",
       "    args = new_args;",
       "    nargs += pap_arity;",
-      "    clo = clo[1];",
+      "    clo = clo.ref[1];",
       "  }",
-      "  ling_obj (*f)() = clo[2];",
-      "  nargs -= clo[1];",
-      "  switch (clo[1]) {",
+      "  ling_obj (*f)() = clo.ref[2].func;",
+      "  nargs -= clo.ref[1].uint_val;",
+      "  switch (clo.ref[1].uint_val) {",
       vcat (fmap arm [1..n]),
-      "    default: return ling_match_error(\"Arity to large in apply\");",
+      "    default: return ling_match_error(\"Arity too large in apply\");",
       "  }",
       "}",
       "return clo;"]

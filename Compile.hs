@@ -220,13 +220,19 @@ conBinding i nm d@(Desc _ a _ _) act = do
   st <- bindEnvWith const i (Con, KnownValue (VDesc d), nm) <$> get
   local (const st) $ do
     (kn, gen) <- act
-    pure (kn, do
-      let as = fmap (N "arg" "arg") [0..toInteger a - 1]
-      mkFnDecl nm a
-      mkDesc nm a
-      mkFn nm as $ do
-        stmt (sep ["return", cCall "ling_new_obj" (pp <$> contextArg : nm : as) <> semi])
-      gen)
+    let
+      gen'
+        | a == 0 =
+          toplevel
+            (hsep ["const", "ling_desc", pp nm, equals] <+>
+             (cCall "LING_MK_DESC" [ pp nm, int a, "NULL", text (show i)] <> semi))
+        | otherwise = do
+          let as = fmap (N "arg" "arg") [0..toInteger a - 1]
+          mkFnDecl nm a
+          mkDesc nm a
+          mkFn nm as $ do
+            stmt (sep ["return", cCall "ling_new_obj" (pp <$> contextArg : nm : as) <> semi])
+    pure (kn, gen' >> gen)
 
 -- Match monad.
 type MM a = State St a
@@ -322,7 +328,7 @@ match' (Id _ _ Con con) (KnownValue (VCon0 con'), _) _
 match' (Id _ _ Con   _) (KnownValue _, _) sfail = alwaysFail sfail
 match' (Id s _ Con con) (_, nm) sfail = do
   cname <- funName s con
-  mayFail $ stmt $ cIf (hsep [pp cname, "!=", pp nm]) sfail
+  mayFail $ stmt $ cIf (hsep [aDesc (pp cname), "!=", pp nm]) sfail
 match' (Const _ c) (KnownValue (VConst c'), _) _
   | c == c' = alwaysSucceed
 match' (Const _ _) (KnownValue _, _) sfail = alwaysFail sfail
@@ -690,14 +696,14 @@ noFold :: CloFun E
 noFold = CloFun $ \_ -> error "Can't fold fns"
 
 vClo :: HasCallStack => Span -> Name -> Arity -> CloInfo -> [Clause] -> EV
-vClo s f n ci@(_, envName, unpackAndBind) cs k = do
+vClo s f n ci@(_, envName, unpackAndBind) cs k = locally $ do
   let
     d = Desc (toVar f) n NoFold noFold
     kn | hasEnv ci = KnownDesc DiffEnv $ d
        | otherwise = KnownValue $ VDesc $ d
   (kn,) <$> do
     as <- traverse withName (clauseVars cs)
-    (_, body) <- unpackAndBind $ locally $ appDisjs s cs ((Unknown,) <$> as) Return
+    (_, body) <- unpackAndBind $ appDisjs s cs ((Unknown,) <$> as) Return
     let as' | hasEnv ci = envArg : as
             | otherwise = as
         func = mkFn f as' body

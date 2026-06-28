@@ -6,7 +6,8 @@ module CUtil(
   cFuncDecl, cFuncHeader, cReturn, cIf, cArray,
   Label, cLabel, cGoto,
   cMatchError,
-  cDesc, cDescRHS
+  cDesc, cDescRHS,
+  aDesc
 ) where
 import AST(Var, PP(..))
 import Names(Name(..), contextArg, funcOf)
@@ -43,7 +44,7 @@ cObjAssign v code = hang (pp v <+> equals) 2 (code <> semi)
 
 cFuncDecl :: Name -> Int -> Code
 cFuncDecl n a =
-  cCall ("ling_obj" <+> funcOf n) ("ling_context" : replicate a "ling_obj")
+  cCall ("ling_obj" <+> funcOf n) ("ling_context *" : replicate a "ling_obj")
 
 cFuncHeader :: Name -> [Name] -> Code
 cFuncHeader n as = do
@@ -73,8 +74,12 @@ cMatchError sloc = cReturn (cCall "ling_match_error" [text (show sloc)])
 -- Static descriptor value
 cDesc :: Doc -> Var -> Int -> Code
 cDesc mangled name arity =
-  hsep ["const", "ling_obj", mangled<>"[4]", equals] <+> cDescRHS mangled name arity
+  hsep ["const", "ling_desc", mangled, equals] <+> (cDescRHS mangled name arity <> semi)
 
 cDescRHS :: Doc -> Var -> Int -> Code
 cDescRHS mangled name arity =
-  cArray [ mangled, int arity, "&"<>funcOf mangled, text (show name)]
+  cCall "LING_MK_DESC" [ mangled, int arity, "&"<>funcOf mangled, text (show name)]
+
+-- argument forms
+aDesc :: Doc -> Code
+aDesc = cCall "LING_DESC" . (:[])
