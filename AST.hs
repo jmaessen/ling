@@ -176,6 +176,12 @@ ppDef lhs eq e = hang (lhs <+> eq) 2 (pp e)
 allSpans2 :: (IsAST a, IsAST b) => a -> b -> [Span]
 allSpans2 a b = allSpans a <> allSpans b
 
+instance PP Constant where
+  pp (EInt i) = integer i
+  pp (EFloat d) = double d
+  pp (EChar c) = PP.text (show c)
+  pp (EString s) = PP.text (show s)
+
 instance PP Exp where
   pp (Id _ Ident _ e) = pp e
   pp (Id _ Op _ o) = parens (pp o)
@@ -185,10 +191,7 @@ instance PP Exp where
   pp (Asc _ e t) = ppOp e ":" t
   pp (Arrow _ a b) = ppOp a "->" b
   pp (Wild _) = "_"
-  pp (Const _ (EInt i)) = integer i
-  pp (Const _ (EFloat d)) = double d
-  pp (Const _ (EChar c)) = PP.text (show c)
-  pp (Const _ (EString s)) = PP.text (show s)
+  pp (Const _ c) = pp c
   pp (Ops e []) = pp e
   pp (Ops e ((o, e2) : es)) = ppOp e (ppOppy o) (Ops e2 es)
   pp (Case _ e ds) = ppDef "case" (pp e) (Block ds)

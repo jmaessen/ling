@@ -230,8 +230,9 @@ conBinding i nm d@(Desc _ a _ _) act = do
           let as = fmap (N "arg" "arg") [0..toInteger a - 1]
           mkFnDecl nm a
           mkDesc nm a
-          mkFn nm as $ do
-            stmt (sep ["return", cCall "ling_new_obj" (pp <$> contextArg : nm : as) <> semi])
+          mkFn nm as $
+            stmt (cReturn $
+                  cCall "ling_new_obj" [pp contextArg, pp nm, cArgArray (pp <$> as)])
     pure (kn, gen' >> gen)
 
 -- Match monad.
@@ -328,14 +329,18 @@ match' (Id _ _ Con con) (KnownValue (VCon0 con'), _) _
 match' (Id _ _ Con   _) (KnownValue _, _) sfail = alwaysFail sfail
 match' (Id s _ Con con) (_, nm) sfail = do
   cname <- funName s con
-  mayFail $ stmt $ cIf (hsep [aDesc (pp cname), "!=", pp nm]) sfail
+  mayFail $ stmt $ cIf (hsep [pp cname, "!=", gRef(pp nm)]) sfail
 match' (Const _ c) (KnownValue (VConst c'), _) _
   | c == c' = alwaysSucceed
 match' (Const _ _) (KnownValue _, _) sfail = alwaysFail sfail
 match' c@(Const _ (EString _)) (_, nm) sfail = mayFail $
-  stmt $ cIf (hsep [cCall "strcmp" [pp c, pp nm], "!=", "0"]) sfail
-match' c@(Const _ _) (_, nm) sfail = mayFail $ do
-  stmt $ cIf (hsep [pp c, "!=", pp nm]) sfail
+  stmt $ cIf (hsep [cCall "strcmp" [pp c, gString $ pp nm], "!=", "0"]) sfail
+match' c@(Const _ (EInt _)) (_, nm) sfail = mayFail $ do
+  stmt $ cIf (hsep [pp c, "!=", gInt $ pp nm]) sfail
+match' c@(Const _ (EFloat _)) (_, nm) sfail = mayFail $ do
+  stmt $ cIf (hsep [pp c, "!=", gFloat $ pp nm]) sfail
+match' c@(Const _ (EChar _)) (_, nm) sfail = mayFail $ do
+  stmt $ cIf (hsep [pp c, "!=", gChar $ pp nm]) sfail
 match' (Block (_, ds)) (_, name) sfail = do
   ms <- traverse (\d -> matchField name d sfail) ds
   pure (foldr (meet . fst) AlwaysSucceeds ms, traverse_ snd ms)
@@ -476,22 +481,27 @@ applyKnown' s _ kn _ _ = error (s++" applyKnown non-descy " ++ showPp kn)
 pApKnown :: HasCallStack =>
   String -> Var -> Known -> CG Code -> [Code] -> CG Code
 pApKnown s nm (KnownValue (VDesc _)) _ cs = traceCAp s " pknown VDesc " nm $ do
-  pure $ cCall "ling_pap" ([
-    pp contextArg, pp nm, int (length cs)] <> cs)
+  pure $ cCall "ling_pap" [
+    pp contextArg, pp nm, int (length cs), cArgArray cs]
 pApKnown s nm (KnownDesc SameEnv _) _ cs = traceCAp s " pKnown SameEnv " nm $ do
-  pure $ cCall "ling_pap" ([
-    pp contextArg, pp nm, int (length cs + 1), pp envArg] <> cs)
+  pure $ cCall "ling_pap" [
+    pp contextArg, pp nm, int (length cs + 1), pp envArg, cArgArray cs]
 pApKnown s nm (KnownDesc _ _) f cs = traceCAp s " pKnown DiffEnv " nm $ do
   c <- f
-  pure $ cCall "ling_pap" ([
+  pure $ cCall "ling_pap" [
     pp contextArg, pp nm, int (length cs + 1),
-    cCall "ling_field" [c, int 0]] <> cs)
+    cCall "ling_field" [c, int 0], cArgArray cs]
 pApKnown s _ kn _ _ = error (s ++ "non-closure pApKnown "++showPp kn)
 
+constToCode :: Constant -> Code
+constToCode (EInt i) = cCall "LING_INT" [integer i]
+constToCode (EFloat f) = cCall "LING_FLOAT" [double f]
+constToCode c = cCall "LING_STR" [pp c]
+
 valueToCode :: HasCallStack => Span -> Value -> Cont -> E (CG Code)
-valueToCode _ c@(VConst _) k = pure $ cont k $ pure $ pp c
+valueToCode _ (VConst c) k = pure $ cont k $ pure $ constToCode c
 valueToCode _ (VDesc (Desc c _ _ _)) k = do
-  pure $ cont k (pure $ pp c)
+  pure $ cont k (pure $ cCall "LING_DESC" [pp c])
 valueToCode s (VObj (Desc c _ _ _) vs) k = do
   acts <- traverse (\v -> valueToCode s v Exp) vs
   nm <- withName c
@@ -499,8 +509,8 @@ valueToCode s (VObj (Desc c _ _ _) vs) k = do
     cs <- sequenceA acts
     toplevel $ hang
       (hsep ["static", "const", "ling_obj", pp nm <> "[]", equals]) 2
-      (cArray (pp c : cs) <> semi)
-    pure $ pp nm
+      (cArray (cCall "LING_DESC" [pp c] : cs) <> semi)
+    pure $ cCall "LING_REF" [pp nm]
 valueToCode s v _ = expError s ("Can't convert value to code "++showPp v)
 
 -- Evaluate function and args
@@ -508,7 +518,7 @@ applyUnknown :: HasCallStack => CG Code -> [V] -> CG Code
 applyUnknown f as = do
   vs <- args as
   v <- f
-  pure $ cCall "ling_apply" ([pp contextArg, v, int (length as)] <> vs)
+  pure $ cCall "ling_apply" [pp contextArg, v, int (length as), cArgArray vs]
 
 -- Initiates a wrapping switch expression that either returns or binds the
 -- disjunct value.  If we're not returning or binding, we'll need to declare
@@ -539,7 +549,10 @@ appDisjs s ds kns k = do
 eval :: HasCallStack => Exp -> EV
 eval (Id s _ _ i) k = do
   en <- findEnv s i
-  pure (kn_ en, cont k $ pure $ pp $ n_ en)
+  let gen (En{ kn_ = KnownValue (VDesc _)}) =
+        pure . aDesc . pp . n_ $ en
+      gen _ = pure . pp . n_ $ en
+  pure (kn_ en, cont k $ gen en)
 eval (App s e es) k = apply s (eval e) (eval <$> es) k
 eval (Const s c) k = do
   act <- valueToCode s (VConst c) k
@@ -565,13 +578,13 @@ eval (Tuple s es) k = do
     _ -> pure (kn, do
       vs <- args es'
       cont k $ pure $
-        cCall "ling_tuple" (pp contextArg:int a:vs))
+        cCall "ling_tuple" [pp contextArg, int a, cArgArray vs])
 eval (Case s e (_,es)) k = do
   bv <- withName "case_disc"
   (ekn, e') <- eval e (Bind bv)
   sp <- expSP
   (kn, m) <- locally $ appDisjs s (map (toDisj sp) es) [(ekn, bv)] k
-  pure (kn, e' >> m)
+  pure (kn, stmt (cObjDecl bv) >> e' >> m)
 eval (Block b) k = locally (evDefs b k)
 eval e _ = expError (span e) ("eval: Unhandled expression\n  "++showPp e++"\n  "++show e)
 
@@ -634,6 +647,7 @@ evFns fs = do
   pure (r, do
     traverse_ (\(n', a, _, _) -> vCloDecl n' a ci) ns
     traverse_ (\(_, _, _, act) -> act) ns
+    traverse_ (\(n, _, _, _, _) -> when (hasEnv ci) $ decl $ cObjDecl n) named
     mkEnv)
 
 -- Convert local env into closure env.  Returns:
@@ -658,10 +672,12 @@ closed vs = do
     inClo = M.filter (\en -> vgl_ en /= Global) env'
     cloNames = n_ <$> M.elems inClo
     declEnv = do
-      decl $ cObjDeclAssign earg $
-        cCall "ling_mk_env" [pp contextArg, int (length inClo)]
+      decl $ hang (hsep ["ling_obj", ("*"<>pp earg), equals]) 2 $
+        cCall "ling_mk_env" [pp contextArg, int (length inClo)] <> semi
       stmt $
-        cCall "ling_fill_env" (int (length inClo) : pp earg : (pp <$> cloNames)) <> semi
+        cCall "ling_fill_env" [
+          int (length inClo), pp earg,
+          "(ling_obj[])" <> (cArray $ pp <$> cloNames)] <> semi
     unpackEnv =
       [ cObjDeclAssign n (cCall "ling_field" [pp envArg, int i]) |
         (n, i) <- zip cloNames [0..]]
@@ -671,6 +687,7 @@ closed vs = do
       pure $
         (kn, do
           traverse_ decl unpackEnv
+          traverse_ (\name -> stmt ("(void)" <> pp name <> semi)) cloNames
           body)
   (\(~(a,b,c)) -> (a,b,c)) <$>  -- NOTE: required for <<loop>> prevention!
     if null cloNames then
@@ -742,7 +759,7 @@ compileTop (sp, ds) = do
       decls_ inn $*$
       fns_ inn,
       "",
-      hsep ["ling_obj", cCall "initialize" [pp contextArg], lbrace],
+      hsep ["ling_obj", cCall "initialize" ["ling_context *" <> pp contextArg], lbrace],
       nest 2 $ stmts_ inn,
       rbrace
     ]

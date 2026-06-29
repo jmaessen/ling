@@ -46,6 +46,7 @@ typedef struct ling_context {
 #define LING_REF(ptr) (ling_obj){ .ref = ptr }
 #define LING_INT(i)   (ling_obj){ .int_val = i }
 #define LING_UINT(u)  (ling_obj){ .uint_val = u }
+#define LING_FLOAT(f) (ling_obj){ .double_val = f }
 #define LING_STR(str) (ling_obj){ .string = str }
 #define LING_DESC(d)  (ling_obj){ .ref = (const ling_obj *)d }
 #define LING_FUNC(f)  (ling_obj){ .func = f }
@@ -109,6 +110,50 @@ LING_INLINE ling_obj *ling_alloc_object(ling_context *ctxt, size_t n) {
 
 LING_INLINE char *ling_alloc_string(ling_context *ctxt, size_t n) {
   return ling_buf_alloc_string(&ctxt->heap, n);
+}
+
+LING_INLINE int ling_desc_is(const ling_desc desc, ling_obj r) {
+  return (r.ref[0].ref == &desc[0]);
+}
+
+LING_INLINE ling_obj ling_field(ling_obj r, uintptr_t i) {
+  return (r.ref[i+1]);
+}
+
+LING_INLINE ling_obj *ling_mk_env(ling_context *ctxt, uintptr_t arity) {
+  ling_obj *res = ling_alloc_object(ctxt, arity);
+  res[0].ref = &ling_tuples[arity][0];
+  return res;
+}
+
+LING_INLINE void ling_fill_env(uintptr_t arity, ling_obj *res, ling_obj *vals) {
+  memcpy(res, vals, arity * sizeof(ling_obj));
+}
+
+LING_INLINE ling_obj ling_new_obj(ling_context *ctxt, const ling_desc desc, ling_obj *args) {
+  uintptr_t arity = desc[1].uint_val;
+  ling_obj *res = ling_alloc_object(ctxt, arity);
+
+  res[0].ref = &desc[0];
+  ling_fill_env(arity, res, args);
+  return LING_REF(res);
+}
+
+LING_INLINE ling_obj ling_pap(ling_context *ctxt, const ling_desc desc, uintptr_t arity, ling_obj *args) {
+  ling_obj *res = ling_alloc_object(ctxt, arity + 1);
+
+  res[0].ref = &ling_pAps[0][arity - 1][0];
+  res[1].ref = &desc[0];
+  memcpy(res + 2, args, arity * sizeof(ling_obj));
+  return LING_REF(res);
+}
+
+LING_INLINE int ling_is_tuple(uintptr_t arity, ling_obj r) {
+  return ling_desc_is(ling_tuples[arity], r);
+}
+
+LING_INLINE ling_obj ling_tuple(ling_context *ctxt, uintptr_t arity, ling_obj *args) {
+  return ling_new_obj(ctxt, ling_tuples[arity], args);
 }
 
 ling_buf ling_obj_buffer(ling_context *ctxt);

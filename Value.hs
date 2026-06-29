@@ -64,7 +64,7 @@ toListVal (VCon "::" 2 [a,as]) = (a:) <$> toListVal as
 toListVal _ = Nothing
 
 instance PP (Val m) where
-  pp (VConst c) = pp (Const noSpan c)
+  pp (VConst c) = pp c
   pp (VCon0 c) = PP.text (toString c)
   pp (VDesc (Desc v n Fold _)) =
     "<p" <+> PP.text (toString v) <+> (PP.int n <> ">")

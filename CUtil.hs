@@ -3,10 +3,12 @@ module CUtil(
   ($*$), Var, Doc, Code, PP(..),
   cCommas,
   cCall, cObjDeclAssign, cObjDecl, cObjAssign,
-  cFuncDecl, cFuncHeader, cReturn, cIf, cArray,
+  cFuncDecl, cFuncHeader, cReturn, cIf,
+  cArray, cArgArray,
   Label, cLabel, cGoto,
   cMatchError,
   cDesc, cDescRHS,
+  gRef, gString, gInt, gFloat, gChar,
   aDesc
 ) where
 import AST(Var, PP(..))
@@ -56,13 +58,17 @@ cReturn :: Code -> Code
 cReturn c = hang "return" 2 (c <> semi)
 
 cLabel :: Doc -> Label -> Code
-cLabel s l = nest (-1) (s <> integer l <> colon)
+cLabel s l = nest (-1) (s <> integer l <> colon <> semi)
 
 cGoto :: Doc -> Label -> Code
 cGoto s l = "goto" <+> (s <> integer l <> semi)
 
 cArray :: [Code] -> Code
 cArray = braces . cCommas
+
+-- Used in lieu of varargs.
+cArgArray :: [Code] -> Code
+cArgArray = ("(ling_obj[])" <>) . cArray
 
 -- One-sided if statement
 cIf :: Code -> Code -> Code
@@ -79,6 +85,22 @@ cDesc mangled name arity =
 cDescRHS :: Doc -> Var -> Int -> Code
 cDescRHS mangled name arity =
   cCall "LING_MK_DESC" [ mangled, int arity, "&"<>funcOf mangled, text (show name)]
+
+-- getter forms
+gRef :: Doc -> Code
+gRef = (<> ".ref")
+
+gString :: Doc -> Code
+gString = (<> ".string")
+
+gInt :: Doc -> Code
+gInt = (<> ".int_val")
+
+gFloat :: Doc -> Code
+gFloat = (<> ".double_val")
+
+gChar :: Doc -> Code
+gChar c = "(char)" <> gInt c
 
 -- argument forms
 aDesc :: Doc -> Code
