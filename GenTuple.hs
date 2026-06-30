@@ -68,11 +68,13 @@ genApply n = do
       "    clo = clo.ref[1];",
       "  }",
       "  ling_obj (*f)() = clo.ref[2].func;",
-      "  nargs -= clo.ref[1].uint_val;",
-      "  switch (clo.ref[1].uint_val) {",
+      "  uintptr_t arity = clo.ref[1].uint_val;",
+      "  switch (arity) {",
       vcat (fmap arm [1..n]),
       "    default: return ling_match_error(\"Arity too large in apply\");",
       "  }",
+      "  args += arity;",
+      "  nargs -= arity;",
       "}",
       "return clo;"]
   vcat [

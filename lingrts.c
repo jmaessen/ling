@@ -79,7 +79,7 @@ ling_obj *ling_buffer_finalize(ling_context *ctxt, ling_buf buf) {
 }
 
 noreturn ling_obj ling_match_error(char *message) {
-  fprintf(stderr, "%s: Match error.\n", message);
+  fprintf(stderr, "%sMatch error.\n", message);
   exit(EXIT_FAILURE);
 }
 

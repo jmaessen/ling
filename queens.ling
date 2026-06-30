@@ -84,7 +84,7 @@ isSafe u d (n::ns) =
 
 show : [[Int]] -> String
 show as =
-  strConcat ("[" :: interShow shows "" ",\n " as ["]"])
+  strConcat ("[" :: interShow shows "" ",\n " as ["]\n"])
 
 shows : [Int] -> [String] -> [String]
 shows as r = "[" :: interShow showsInt "" ", " as ("]" :: r)
@@ -99,5 +99,4 @@ interShow sh = fn { pre = fn { sep = fn {
   (a::as) r = pre :: sh a (interShow sh sep sep as r)
 }}}
 
-queens 8
-// putStr (show (queens 8))
+putStr (show (queens 8))
