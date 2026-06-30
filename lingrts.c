@@ -179,24 +179,36 @@ P2_DESC(intGE);
 
 // The full-arity case is code generated as fapply and
 // included in lingrts_gen.c.
-ling_obj ling_apply(ling_context *ling_ctxt, ling_obj clo,
-                    uintptr_t nargs, const ling_obj *args_in) {
-  const ling_obj *args = args_in;
+ling_obj ling_apply(ling_context *ctxt, ling_obj clo,
+                    uintptr_t nargs, ling_obj *args_base) {
+  ling_obj *args = args_base;
+  uintptr_t margs = nargs;
   while (nargs > 0) {
     const ling_obj *clo_desc = clo.ref[0].ref;
     if (&ling_pAps[0][0][0] <= clo_desc && clo_desc < &ling_pAps[1][0][0]) {
       uintptr_t pap_arity = 1 + ((ling_desc *)clo_desc - (&ling_pAps[0][0]));
-      ling_obj *new_args = alloca((nargs + pap_arity) * sizeof(ling_obj));
-      memcpy(new_args, clo.ref + 2, pap_arity * sizeof(ling_obj));
-      memcpy(new_args + pap_arity, args, nargs * sizeof(ling_obj));
-      args = new_args;
+      if (pap_arity + nargs > margs) {
+        margs = (nargs + pap_arity) * 2;
+        args_base = alloca(margs * sizeof(ling_obj));
+        memcpy(args_base + margs - nargs, args, nargs * sizeof(ling_obj));
+        args = args_base + margs - nargs;
+      }
+      args -= pap_arity;
       nargs += pap_arity;
+      memcpy(args, clo.ref + 2, pap_arity * sizeof(ling_obj));
       clo = clo.ref[1];
     }
     uintptr_t arity = clo.ref[1].uint_val;
-    clo = fapply(ling_ctxt, clo, args);
-    args += arity;
-    nargs -= arity;
+    if (arity == nargs) {
+      return fapply(ctxt, clo, args);
+    } else if (arity < nargs) {
+      clo = fapply(ctxt, clo, args);
+      args += arity;
+      nargs -= arity;
+    } else {
+      // pAp
+      return ling_pap(ctxt, clo.ref, nargs, args);
+    }
   }
   return clo;
 }

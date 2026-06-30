@@ -56,7 +56,7 @@ genApply n = do
       "ling_obj (*f)() = clo.ref[2].func;",
       "switch (arity) {",
       vcat (fmap arm [1..n]),
-      "  default: return ling_match_error(\"Arity too large in apply\");",
+      "  default: return ling_match_error(\"Arity too large in apply.  \");",
       "}"]
   vcat [
     hsep ["static", "ling_obj", "fapply"<>parens (cCommas args), lbrace],

@@ -87,7 +87,10 @@ show as =
   strConcat ("[" :: interShow shows "" ",\n " as ["]\n"])
 
 shows : [Int] -> [String] -> [String]
-shows as r = "[" :: interShow showsInt "" ", " as ("]" :: r)
+shows as r = {
+  k = interShow showsInt "" ", " as
+  "[" :: k ("]" :: r)
+}
 
 showsInt : Int -> [String] -> [String]
 showsInt i r = intToStr i :: r

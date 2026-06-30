@@ -67,7 +67,7 @@ extern const ling_desc False;
 extern const ling_desc True;
 
 // General apply
-ling_obj ling_apply(ling_context *ctxt, ling_obj clo, uintptr_t nargs, const ling_obj *args_in);
+ling_obj ling_apply(ling_context *ctxt, ling_obj clo, uintptr_t nargs, ling_obj *args);
 
 // Context and heap management
 ling_context ling_init(ling_config);
