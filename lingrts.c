@@ -27,7 +27,7 @@ ling_context ling_init(ling_config config) {
   void *start = aligned_alloc(2 * mib, actual_size);
   if (start == NULL) ling_heap_failure(actual_size);
   void *end = (char *)start + actual_size;
-  return (ling_context){ config, { start, end, start } };
+  return (ling_context){ { start, end, start }, config };
 }
 
 noreturn void ling_oom(void) {
@@ -173,3 +173,107 @@ P2_DESC(intLt);
 P2_DESC(intLE);
 P2_DESC(intGt);
 P2_DESC(intGE);
+
+// Heap dumping nonsense
+
+#if defined(__APPLE__)
+  #include <mach-o/dyld.h>
+  #include <mach-o/getsect.h>
+  /* macOS Mach-O mapping via getsect.h functions */
+  struct dumpmetadata {
+    uintptr_t start, size;
+  };
+
+  void dump_metadata_init(struct dumpmetadata *md) {
+    const struct mach_header_64 *header =
+      (const struct mach_header_64 *)_dyld_get_image_header(0);
+    md->size = 0;
+    md->start =
+      (uintptr_t)getsectiondata(header, "__DATA", "__data", &md->size);
+  }
+#elif defined(__linux__)
+  struct dumpmetadata {};
+#endif
+
+static int inInitData(struct dumpmetadata *md, ling_obj o) {
+  uintptr_t p = o.uint_val;
+#if defined(__APPLE__)
+  uintptr_t start = md->start;
+  uintptr_t size = md->size;
+#elif defined(__linux__)
+  extern char etext[];
+  extern char edata[];
+  uintptr_t start = (uintptr_t)etext;
+  uintptr_t size = (uintptr_t)edata - start;
+#endif
+  return (start <= p && p < start + size);
+}
+
+inline static int aligned(ling_obj o) {
+  return (o.uint_val & 0x7) == 0;
+}
+
+inline static int inHeap(ling_context *ctxt, ling_obj o) {
+  return ctxt->heap.start <= (void *)o.ref &&
+    (void *)o.ref < ctxt->heap.next_free &&
+    aligned(o);
+}
+
+inline static int looksLikeHeader(struct dumpmetadata *md, ling_obj o) {
+  return inInitData(md, o) && aligned(o) &&
+    0 <= o.ref[1].int_val && o.ref[1].int_val < 32 &&
+    inInitData(md, o.ref[3]) && strnlen(o.ref[3].string, 50) < 50;
+}
+
+static void dump_rec(ling_context *ctxt, struct dumpmetadata *md,
+                     ling_obj o, int lvl, int comma_sep) {
+  const char* sep = comma_sep ? ",\n" : "\n";
+  do {
+    if (inHeap(ctxt, o)) {
+      const ling_obj *p = o.ref;
+      const ling_obj desc = p[0];
+      const ling_obj *dr = desc.ref;
+      if (!looksLikeHeader(md, desc) || dr[1].int_val <= 0) {
+        printf("%*s\"%.50s\"%s", lvl * 2, "", o.string, sep);
+        break;
+      }
+      printf("%*s%.50s%s", lvl * 2, "", dr[3].string, sep);
+      const uintptr_t arity = dr[1].uint_val;
+      for (int i = 1; i < arity; ++i) {
+        dump_rec(ctxt, md, p[i], lvl + 1, 0);
+      }
+      o = p[arity];
+      continue;
+    } else if (inInitData(md, o)) {
+      if (looksLikeHeader(md, o)) {
+        printf("%*s%.50s%s", lvl * 2, "", o.ref[3].string, sep);
+      } else {
+        // Assume other static data is string data, which
+        // is actually subtly wrong as we can pre-compile
+        // constant structures.
+        printf("%*s\"%.50s\"%s", lvl * 2, "", o.string, sep);
+      }
+      break;
+    } else {
+      // Treat it as a number (we might want to add float printing here too?)
+      printf("%*s%ld (%lx)%s", lvl * 2, "", o.int_val, o.uint_val, sep);
+      break;
+    }
+  } while (1);
+}
+
+P1(lingDump) {
+  struct dumpmetadata md;
+  dump_metadata_init(&md);
+  dump_rec(ctxt, &md, a, 0, 0);
+  return LING_REF(&ling_tuples[0][0]);
+}
+
+int main(int argc, char *argv[]) {
+  extern ling_obj initialize(ling_context *);
+  setlinebuf(stdin);
+  ling_config conf = {64*1024*1024};
+  ling_context ctxt = ling_init(conf);
+  ling_obj res = initialize(&ctxt);
+  lingDump_FUNC(&ctxt, res);
+}

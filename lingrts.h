@@ -25,9 +25,10 @@ typedef union ling_obj {
 typedef ling_obj ling_desc[4];
 
 typedef struct ling_buf {
-  void *start;
-  void *end; // past last available word
+  // Ordered for hot fields first
   void *next_free; // >=start <= end
+  void *end; // past last available word
+  void *start;
 } ling_buf;
 
 typedef struct ling_region {
@@ -39,8 +40,9 @@ typedef struct ling_config {
 } ling_config;
 
 typedef struct ling_context {
-  ling_config config;
+  // Ordered hot field first
   ling_buf heap;
+  ling_config config;
 } ling_context;
 
 #define LING_REF(ptr) (ling_obj){ .ref = ptr }
@@ -65,7 +67,7 @@ extern const ling_desc False;
 extern const ling_desc True;
 
 // General apply
-ling_obj ling_apply(ling_context *ctxt, ling_obj clo, int nargs, const ling_obj *args_in);
+ling_obj ling_apply(ling_context *ctxt, ling_obj clo, uintptr_t nargs, const ling_obj *args_in);
 
 // Context and heap management
 ling_context ling_init(ling_config);
@@ -127,7 +129,7 @@ LING_INLINE ling_obj *ling_mk_env(ling_context *ctxt, uintptr_t arity) {
 }
 
 LING_INLINE void ling_fill_env(uintptr_t arity, ling_obj *res, ling_obj *vals) {
-  memcpy(res, vals, arity * sizeof(ling_obj));
+  memcpy(res + 1, vals, arity * sizeof(ling_obj));
 }
 
 LING_INLINE ling_obj ling_new_obj(ling_context *ctxt, const ling_desc desc, ling_obj *args) {
@@ -153,7 +155,11 @@ LING_INLINE int ling_is_tuple(uintptr_t arity, ling_obj r) {
 }
 
 LING_INLINE ling_obj ling_tuple(ling_context *ctxt, uintptr_t arity, ling_obj *args) {
-  return ling_new_obj(ctxt, ling_tuples[arity], args);
+  ling_obj *res = ling_alloc_object(ctxt, arity);
+
+  res[0].ref = &ling_tuples[arity][0];
+  ling_fill_env(arity, res, args);
+  return LING_REF(res);
 }
 
 ling_buf ling_obj_buffer(ling_context *ctxt);
@@ -214,6 +220,8 @@ P1(putStr) {
   fputs(a.string, stdout);
   return LING_REF(&ling_tuples[0][0]);
 }
+
+P1_DECL(lingDump);
 
 #define PRIM_II_I(name, op) \
 LING_INLINE ling_obj name##_FUNC(ling_context *_ctxt, ling_obj a, ling_obj b) { \

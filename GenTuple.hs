@@ -42,7 +42,7 @@ genApply n = do
     args = [
       "ling_context" <+> ("*" <> pp contextArg),
       "ling_obj" <+> "clo",
-      "int" <+> "nargs",
+      "uintptr_t" <+> "nargs",
       "const ling_obj" <+> "*args_in"]
     arm k = nest 4 $ vcat [
       hsep["case", int k, colon],
@@ -51,7 +51,7 @@ genApply n = do
           "clo =",
           nest 2 $ sep[
             "(*(ling_obj (*)("<>cCommas ("ling_context *" : replicate k "ling_obj")<>"))f)",
-            parens (cCommas (pp contextArg : ((\i -> hcat ["args[", int i, rbrack]) <$> [1..k])))<>semi]],
+            parens (cCommas (pp contextArg : ((\i -> hcat ["args[", int i, rbrack]) <$> [0..k-1])))<>semi]],
         "break;" ]]
     body = vcat [
       "const ling_obj *args = args_in;",
@@ -59,10 +59,10 @@ genApply n = do
       "  const ling_obj *clo_desc = clo.ref[0].ref;",
       -- Note: Relies on ling_pAps being a sized array to compute arity without lookup.
       "  if (&ling_pAps[0][0][0] <= clo_desc && clo_desc < &ling_pAps[1][0][0]) {",
-      "    int pap_arity = 1 + ((ling_desc *)clo_desc - (&ling_pAps[0][0]));",
+      "    uintptr_t pap_arity = 1 + ((ling_desc *)clo_desc - (&ling_pAps[0][0]));",
       "    ling_obj *new_args = alloca((nargs + pap_arity) * sizeof(ling_obj));",
       "    memcpy(new_args, clo.ref + 2, pap_arity * sizeof(ling_obj));",
-      "    memcpy(new_args, args, nargs * sizeof(ling_obj));",
+      "    memcpy(new_args + pap_arity, args, nargs * sizeof(ling_obj));",
       "    args = new_args;",
       "    nargs += pap_arity;",
       "    clo = clo.ref[1];",

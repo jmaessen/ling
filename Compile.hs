@@ -475,7 +475,7 @@ applyKnown' s nm (KnownDesc SameEnv _) _ as = traceCAp s " known SameEnv " nm $ 
   pure $ cCall (funcOf nm) (pp contextArg : pp envArg : as)
 applyKnown' s nm (KnownDesc _ _) f as = traceCAp s " known DiffEnv " nm $ do
   c <- f
-  pure $ cCall (funcOf nm) (pp contextArg : cCall "ling_field" [c, int 0] : as)
+  pure $ cCall (funcOf nm) (pp contextArg : cCall "ling_field" [c, int 1] : as)
 applyKnown' s _ kn _ _ = error (s++" applyKnown non-descy " ++ showPp kn)
 
 pApKnown :: HasCallStack =>
@@ -725,7 +725,7 @@ vClo s f n ci@(_, envName, unpackAndBind) cs k = locally $ do
             | otherwise = as
         func = mkFn f as' body
         closure en k' = cont k' $ do
-          pure $ cCall "ling_pap" [pp contextArg, pp f, int 1, pp en]
+          pure $ cCall "ling_pap" [pp contextArg, pp f, int 1, cArgArray [cCall "LING_REF" [pp en]]]
     case (envName, k) of
       (Nothing, Bind f')
         | f == f' -> pure (func >> pure (pp f))
