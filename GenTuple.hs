@@ -42,43 +42,24 @@ genApply n = do
     args = [
       "ling_context" <+> ("*" <> pp contextArg),
       "ling_obj" <+> "clo",
-      "uintptr_t" <+> "nargs",
-      "const ling_obj" <+> "*args_in"]
-    arm k = nest 4 $ vcat [
+      "const ling_obj" <+> "*args"]
+    arm k = nest 2 $ vcat [
       hsep["case", int k, colon],
       nest 2 $ vcat[
         sep [
-          "clo =",
+          "return",
           nest 2 $ sep[
             "(*(ling_obj (*)("<>cCommas ("ling_context *" : replicate k "ling_obj")<>"))f)",
-            parens (cCommas (pp contextArg : ((\i -> hcat ["args[", int i, rbrack]) <$> [0..k-1])))<>semi]],
-        "break;" ]]
+            parens (cCommas (pp contextArg : ((\i -> hcat ["args[", int i, rbrack]) <$> [0..k-1])))<>semi]]]]
     body = vcat [
-      "const ling_obj *args = args_in;",
-      "while (nargs > 0) {",
-      "  const ling_obj *clo_desc = clo.ref[0].ref;",
-      -- Note: Relies on ling_pAps being a sized array to compute arity without lookup.
-      "  if (&ling_pAps[0][0][0] <= clo_desc && clo_desc < &ling_pAps[1][0][0]) {",
-      "    uintptr_t pap_arity = 1 + ((ling_desc *)clo_desc - (&ling_pAps[0][0]));",
-      "    ling_obj *new_args = alloca((nargs + pap_arity) * sizeof(ling_obj));",
-      "    memcpy(new_args, clo.ref + 2, pap_arity * sizeof(ling_obj));",
-      "    memcpy(new_args + pap_arity, args, nargs * sizeof(ling_obj));",
-      "    args = new_args;",
-      "    nargs += pap_arity;",
-      "    clo = clo.ref[1];",
-      "  }",
-      "  ling_obj (*f)() = clo.ref[2].func;",
-      "  uintptr_t arity = clo.ref[1].uint_val;",
-      "  switch (arity) {",
+      "uintptr_t arity = clo.ref[1].uint_val;",
+      "ling_obj (*f)() = clo.ref[2].func;",
+      "switch (arity) {",
       vcat (fmap arm [1..n]),
-      "    default: return ling_match_error(\"Arity too large in apply\");",
-      "  }",
-      "  args += arity;",
-      "  nargs -= arity;",
-      "}",
-      "return clo;"]
+      "  default: return ling_match_error(\"Arity too large in apply\");",
+      "}"]
   vcat [
-    hsep ["ling_obj", "ling_apply"<>parens (cCommas args), lbrace],
+    hsep ["static", "ling_obj", "fapply"<>parens (cCommas args), lbrace],
     nest 2 body,
     rbrace]
 

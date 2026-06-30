@@ -174,6 +174,35 @@ P2_DESC(intLE);
 P2_DESC(intGt);
 P2_DESC(intGE);
 
+////////////////////////////////////////////////////////////
+// General apply
+
+// The full-arity case is code generated as fapply and
+// included in lingrts_gen.c.
+ling_obj ling_apply(ling_context *ling_ctxt, ling_obj clo,
+                    uintptr_t nargs, const ling_obj *args_in) {
+  const ling_obj *args = args_in;
+  while (nargs > 0) {
+    const ling_obj *clo_desc = clo.ref[0].ref;
+    if (&ling_pAps[0][0][0] <= clo_desc && clo_desc < &ling_pAps[1][0][0]) {
+      uintptr_t pap_arity = 1 + ((ling_desc *)clo_desc - (&ling_pAps[0][0]));
+      ling_obj *new_args = alloca((nargs + pap_arity) * sizeof(ling_obj));
+      memcpy(new_args, clo.ref + 2, pap_arity * sizeof(ling_obj));
+      memcpy(new_args + pap_arity, args, nargs * sizeof(ling_obj));
+      args = new_args;
+      nargs += pap_arity;
+      clo = clo.ref[1];
+    }
+    uintptr_t arity = clo.ref[1].uint_val;
+    clo = fapply(ling_ctxt, clo, args);
+    args += arity;
+    nargs -= arity;
+  }
+  return clo;
+}
+
+
+////////////////////////////////////////////////////////////
 // Heap dumping nonsense
 
 // Static (initialized) data can be scattered across several sections, so we
