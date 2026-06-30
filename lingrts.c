@@ -176,37 +176,59 @@ P2_DESC(intGE);
 
 // Heap dumping nonsense
 
+// Static (initialized) data can be scattered across several sections, so we
+// record a list of [start, start+size) ranges rather than a single span.
+#define LING_MAX_INITDATA_RANGES 8
+struct dumpmetadata {
+  int n;
+  struct { uintptr_t start, size; } ranges[LING_MAX_INITDATA_RANGES];
+};
+
 #if defined(__APPLE__)
   #include <mach-o/dyld.h>
   #include <mach-o/getsect.h>
   /* macOS Mach-O mapping via getsect.h functions */
-  struct dumpmetadata {
-    uintptr_t start, size;
-  };
-
   void dump_metadata_init(struct dumpmetadata *md) {
     const struct mach_header_64 *header =
       (const struct mach_header_64 *)_dyld_get_image_header(0);
-    md->size = 0;
-    md->start =
-      (uintptr_t)getsectiondata(header, "__DATA", "__data", &md->size);
+    static const char *const specs[][2] = {
+      {"__DATA_CONST", "__const"},   // descriptors (relocated const)
+      {"__TEXT",       "__cstring"}, // name strings / string literals
+      {"__TEXT",       "__const"},   // pure read-only consts (precompiled structs)
+      {"__DATA",       "__const"},   // const data that ended up in writable segment
+      {"__DATA",       "__data"},    // mutable initialized data, if any
+    };
+    md->n = 0;
+    for (int i = 0; i < (int)(sizeof(specs) / sizeof(specs[0])); ++i) {
+      unsigned long size = 0;
+      uint8_t *p = getsectiondata(header, specs[i][0], specs[i][1], &size);
+      if (p && size && md->n < LING_MAX_INITDATA_RANGES) {
+        md->ranges[md->n].start = (uintptr_t)p;
+        md->ranges[md->n].size = (uintptr_t)size;
+        md->n++;
+      }
+    }
   }
 #elif defined(__linux__)
-  struct dumpmetadata {};
+  // On ELF [etext, edata) spans .rodata + .data, covering both descriptors and
+  // string constants.
+  void dump_metadata_init(struct dumpmetadata *md) {
+    extern char etext[], edata[];
+    md->n = 1;
+    md->ranges[0].start = (uintptr_t)etext;
+    md->ranges[0].size = (uintptr_t)edata - (uintptr_t)etext;
+  }
+#else
+  void dump_metadata_init(struct dumpmetadata *md) { md->n = 0; }
 #endif
 
 static int inInitData(struct dumpmetadata *md, ling_obj o) {
   uintptr_t p = o.uint_val;
-#if defined(__APPLE__)
-  uintptr_t start = md->start;
-  uintptr_t size = md->size;
-#elif defined(__linux__)
-  extern char etext[];
-  extern char edata[];
-  uintptr_t start = (uintptr_t)etext;
-  uintptr_t size = (uintptr_t)edata - start;
-#endif
-  return (start <= p && p < start + size);
+  for (int i = 0; i < md->n; ++i) {
+    uintptr_t start = md->ranges[i].start;
+    if (start <= p && p < start + md->ranges[i].size) return 1;
+  }
+  return 0;
 }
 
 inline static int aligned(ling_obj o) {
