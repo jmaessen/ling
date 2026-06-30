@@ -13,7 +13,6 @@
 #endif
 
 typedef union ling_obj {
-  const void *whatever;
   const union ling_obj *ref;
   intptr_t int_val;
   uintptr_t uint_val;
