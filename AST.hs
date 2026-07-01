@@ -69,7 +69,7 @@ type Pat = Exp
 
 data Exp
   = Id Span OpOrIdent ConOrVar ByteString
-  | App Span Exp [Exp]
+  | App Span [Exp]
   | Fn Span Defs
   | Asc Span Exp Exp
   | Arrow Span Exp Exp
@@ -185,8 +185,9 @@ instance PP Constant where
 instance PP Exp where
   pp (Id _ Ident _ e) = pp e
   pp (Id _ Op _ o) = parens (pp o)
-  pp (App _ o [a, b]) | null $ isOppy o = pp a <+> ppOppy o <+> pp b
-  pp (App _ e1 e2) = pp e1 <+> sep (pp <$> e2)
+  pp (App _ [o, a, b]) | null $ isOppy o = pp a <+> ppOppy o <+> pp b
+  pp (App _ []) = "<BAD: empty app>"
+  pp (App _ es) = sep (pp <$> es)
   pp (Fn _ body) = ppBlock "fn" body
   pp (Asc _ e t) = ppOp e ":" t
   pp (Arrow _ a b) = ppOp a "->" b
@@ -214,7 +215,8 @@ instance PP Exp where
 
 instance IsAST Exp where
   isValid (Id _ _ _ _) = []
-  isValid (App _ e1 e2) = isValid e1 <> isValid e2
+  isValid (App s []) = [(s, "Empty App")]
+  isValid (App _ es) = isValid es
   isValid (Fn _ body) = isFn body
   isValid (Asc _ e t) = isValid e <> isTy t
   isValid (Arrow s _ _) = [(s, "Arrow type in expression")]
@@ -234,7 +236,7 @@ instance IsAST Exp where
   isValid (Block ds) = isValid ds
   isValid (OpExp _ o) = isValid o
   span (Id s _ _ _) = s
-  span (App s _ _) = s
+  span (App s _) = s
   span (Fn s _) = s
   span (Asc s _ _) = s
   span (Arrow s _ _) = s
@@ -254,7 +256,7 @@ instance IsAST Exp where
   span (Block ds) = span ds
   span (OpExp s _) = s
   allSpans (Id s _ _ _) = [s]
-  allSpans (App s e es) = s : allSpans (e:es)
+  allSpans (App s es) = s : allSpans es
   allSpans (Fn s ds) = s : allSpans ds
   allSpans (Asc s t e) = s : allSpans2 t e
   allSpans (Arrow s a b) = s : allSpans2 a b
@@ -274,7 +276,7 @@ instance IsAST Exp where
   allSpans (Block ds) = allSpans ds
   allSpans (OpExp s e) = s : allSpans e
   fullParen e@(Id _ _ _ _) = e
-  fullParen (App s e1 es) = par (App s (fp e1) (fmap fp es))
+  fullParen (App s es) = par (App s (fmap fp es))
   fullParen (Fn s body) = par (Fn s (fp body))
   fullParen (Asc s e t) = par (Asc s (fp e) (fp t))
   fullParen (Arrow s a b) = par (Arrow s (fp a) (fp b))
@@ -296,7 +298,7 @@ instance IsAST Exp where
   fullParen (Block ds) = Block (fp ds)
   fullParen (OpExp s e) = OpExp s (fpe e)
   noParen e@(Id _ _ _ _) = e
-  noParen (App s e1 es) = App s (noParen e1) (noParen es)
+  noParen (App s es) = App s (noParen es)
   noParen (Fn s ds) = Fn s (noParen ds)
   noParen (Asc s e t) = Asc s (noParen e) (noParen t)
   noParen (Arrow s a b) = Arrow s (noParen a) (noParen b)
@@ -316,7 +318,7 @@ instance IsAST Exp where
   noParen (Block ds) = Block (noParen ds)
   noParen (OpExp s e) = OpExp s (noParen e)
   fv (Id _ _ _ v) = S.singleton v
-  fv (App _ e1 es) = fv e1 <> fv es
+  fv (App _ es) = fv es
   fv (Fn _ ds) = fv ds
   fv (Asc _ e t) = fv e <> fv t
   fv (Arrow _ a b) = fv a <> fv b
@@ -361,7 +363,7 @@ ppOppy (Paren _ e) = ppOppy e
 ppOppy e = pp (OpExp (span e) e)
 
 isArgs :: Exp -> ValidErrs
-isArgs (App _ a e) = isArgs a <> concatMap isPat e
+isArgs (App _ (a:e)) = isArgs a <> concatMap isPat e
 isArgs e = isPat e
 
 isFnBind :: (Span, Def) -> ValidErrs
@@ -373,7 +375,7 @@ isFn (s, []) = [(s, "Empty function definiton")]
 isFn (_, ps) = concatMap isFnBind ps
 
 isPat :: Exp -> ValidErrs
-isPat (App _ a es) = isPatL a <> concatMap isPat es
+isPat a@(App _ _) = isPatL a
 isPat (Asc _ e t) = isPat e <> isTy t
 isPat (Id _ _ _ _) = []
 isPat (Wild _) = []
@@ -386,7 +388,8 @@ isPat e = [(span e, "Not a valid pattern")]
 
 isPatL :: Exp -> ValidErrs
 isPatL (Id _ _ Con _) = []
-isPatL (App _ a es) = isPatL a <> concatMap isPat es
+isPatL (App s []) = [(s, "Empty app in pat")]
+isPatL (App _ (a:es)) = isPatL a <> concatMap isPat es
 isPatL (Asc _ e t) = isPatL e <> isTy t
 isPatL (Paren _ e) = isPatL e
 isPatL e = [(span e, "Not a valid pattern head")]
@@ -440,7 +443,8 @@ instance IsAST Def where
   fv (Fix _ _ _) = mempty
 
 isLHS :: Exp -> ValidErrs
-isLHS (App _ a es) = isLHS a <> concatMap isPat es
+isLHS (App s []) = [(s, "Empty app in LHS")]
+isLHS (App _ (a:es)) = isLHS a <> concatMap isPat es
 isLHS (Asc _ a t) = isLHS a <> isTy t
 isLHS (Id _ _ _ _) = []
 isLHS (Paren _ e) = isLHS e
@@ -457,7 +461,8 @@ isLHS e = [(span e, "Not a valid LHS head")]
 
 isTyCon :: Exp -> ValidErrs
 isTyCon (Id _ _ Con _) = []
-isTyCon (App _ a e) = isTyCon a <> concatMap isTyArg e
+isTyCon (App s []) = [(s, "Empty app in TyCon")]
+isTyCon (App _ (a:e)) = isTyCon a <> concatMap isTyArg e
 isTyCon (Asc _ e t) = isTyCon e <> isTy t
 isTyCon (Paren _ e) = isTyCon e
 isTyCon (List _ []) = []
@@ -485,7 +490,8 @@ isCon e = [(span e, "Not a constructor name in ascribed constructor def")]
 
 isConDefApp :: Exp -> ValidErrs
 isConDefApp (Id _ _ Con _) = []
-isConDefApp (App _ a e) = isConDefApp a <> concatMap isTy e
+isConDefApp (App s []) = [(s, "Empty app in ConDef")]
+isConDefApp (App _ (a:e)) = isConDefApp a <> concatMap isTy e
 isConDefApp (Paren _ e) = isConDefApp e
 isConDefApp (List _ []) = []
 isConDefApp e = [(span e, "Not a valid constructor name in short constructor def")]
@@ -504,7 +510,8 @@ isFieldName e = [(span e, "Invalid field name")]
 
 isTy :: Exp -> ValidErrs
 isTy (Id _ _ _ _) = []
-isTy (App _ a b) = isTy a <> concatMap isTy b
+isTy (App s []) = [(s, "Empty app in Ty")]
+isTy (App _ b) = concatMap isTy b
 isTy (Asc _ t k) = isTy t <> isTy k
 isTy (Arrow _ a b) = isTy a <> isTy b
 isTy (Wild _) = []
@@ -538,7 +545,7 @@ instance PP DefGroup where
   pp (Record m) = pp [(Def (Id noSpan Ident Var f) e) | (f, e) <- M.toList m]
   pp (Fns m) = PP.vcat $ concat [
     ["-- Group:"],
-    [pp $ Def (App s i ps) e |
+    [pp $ Def (App s (i:ps)) e |
       (s, nm, _, pes) <- m,
       let i = Id s Ident Var nm,
       (ps, e) <- pes ],
@@ -597,18 +604,18 @@ groupDefs (_, ds) =
     r -> r
 
 groupDef :: HasCallStack => (Span, Def) -> Either ValidErrs [DefGroup] -> Either ValidErrs [DefGroup]
-groupDef (s, Def (App s' (Asc _ p _) ps) e) ts =
-  groupDef (s, Def (App s' p ps) e) ts
-groupDef (s, Def (App s' (App _ p ps) ps') e) ts =
-  groupDef (s, Def (App s' p (ps ++ ps')) e) ts
-groupDef (s, Def (App _ (Id _ _ Var f) ps) e) (Right (Fns ((s', ff, n, pes): fns) : ts))
+groupDef (s, Def (App s' (Asc _ p _ : ps)) e) ts =
+  groupDef (s, Def (App s' (p : ps)) e) ts
+groupDef (s, Def (App s' (App _ ps : ps')) e) ts =
+  groupDef (s, Def (App s' (ps ++ ps')) e) ts
+groupDef (s, Def (App _ (Id _ _ Var f : ps)) e) (Right (Fns ((s', ff, n, pes): fns) : ts))
   | f == ff =
     if n /= length ps then
       Left [(s, ("Arity mismatch in definition of " <> f))]
     else
       Right (Fns ((s <> s', ff, n, (ps, e):pes) : fns) : ts)
   | otherwise = Right (Fns ((s, f, length ps, [(ps, e)]) : (s', ff, n, pes) : fns) : ts)
-groupDef (s, Def (App _ (Id _ _ Var f) ps) e) (Right ts) =
+groupDef (s, Def (App _ (Id _ _ Var f : ps)) e) (Right ts) =
   Right (Fns [(s, f, length ps, [(ps, e)])] : ts)
 groupDef (s, Def i@(Id _ _ _ _) (Asc _ e _)) ts = groupDef (s, Def i e) ts
 groupDef (s, Def i@(Id _ _ _ _) (Paren _ e)) ts = groupDef (s, Def i e) ts
@@ -640,11 +647,11 @@ fnToGroup s f (_, ds) = (s, f, aty cs, cs) where
 patToPats :: Pat -> [Pat]
 patToPats (Asc _ p _) = patToPats p
 patToPats (Paren _ p) = [p]
-patToPats (App _ p ps) = p:ps
+patToPats (App _ ps) = ps
 patToPats p = [p]
 
 -- Turn a clausal list of patterns into a match pattern
 patsToPat :: [Pat] -> Pat
 patsToPat [] = error "patsToPat []"
 patsToPat [p] = Paren (span p) p
-patsToPat (p:ps) = App (span p <> span ps) p ps
+patsToPat ps = App (span ps) ps

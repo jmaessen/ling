@@ -257,9 +257,9 @@ expParens =
        (_, es) -> flip Tuple es
 
 app :: [Exp] -> Exp
-app [e] = e
-app (e:es) = App (span e <> span (last es)) e es
 app [] = error "app []"
+app [e] = e
+app es = App (span es) es
 
 ops :: Exp -> [(Exp, Exp)] -> Exp
 ops e [] = e
@@ -376,7 +376,7 @@ unfixDef _  f@(Fix _ _ _) = f -- Or strip?
 
 unfixExp :: Fixities -> Exp -> Exp
 unfixExp _ e@(Id _ _ _ _) = e
-unfixExp fs (App s a b) = App s (unfixExp fs a) (unfixExp fs <$> b)
+unfixExp fs (App s a) = App s (unfixExp fs <$> a)
 unfixExp fs (Fn s ds) = Fn s $ unfix fs ds
 unfixExp fs (Asc s a b) = Asc s (unfixExp fs a) (unfixExp fs b)
 unfixExp fs (Arrow s a b) = Arrow s (unfixExp fs a) (unfixExp fs b)
@@ -399,7 +399,7 @@ unfixExp fs (OpExp s e) = OpExp s $ unfixExp fs e
 unfixExp fs (Ops e oes) = unfixOps fs e oes
 
 opApp :: Exp -> Exp -> Exp -> Exp
-opApp a op b = App (span a <> span b) op [a, b]
+opApp a op b = App (span a <> span b) [op, a, b]
 
 unfixOps :: Fixities -> Exp -> [(Exp, Exp)] -> Exp
 unfixOps fs a [] = unfixExp fs a

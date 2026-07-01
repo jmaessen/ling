@@ -157,14 +157,14 @@ match' (Const _ c) (VConst vc)
 match' (Const _ _) _ = matchFail
 match' (Block (_, ds)) (VStruct fs) = mapM_ (`matchField` fs) ds
 match' (Block _) _ = matchFail
-match' p@(App s (Id _ _ Con con) as) v@(VCon cn n rs)
+match' p@(App s (Id _ _ Con con : as)) v@(VCon cn n rs)
   | n /= length rs =
       matchError s ("Obj ctor arity "++show n++" mismatch "++showPp v)
   | len == n && con == cn = matches' as rs
   | len /= n && con == cn =
       matchError s ("Constructor pat expected arity "++show n ++ ": "++showPp p)
   where len = length as
-match' (App _ (Id _ _ _ _) _) _ = matchFail
+match' (App _ (Id _ _ _ _ : _)) _ = matchFail
 match' p _ = matchError (span p) ("Unrecognized pattern "++showPp p)
 
 matchField :: HasCallStack => (Span, Def) -> M (Map FieldName Value) ()
@@ -211,7 +211,7 @@ appDisjs s f ((ps, e): cs) vs = do
 
 eval :: HasCallStack => Exp -> E Value
 eval (Id s _ _ i) = findEnv s i
-eval (App s e es) = do
+eval (App s (e:es)) = do
   apply s (eval e) (eval <$> es)
 eval (Const _ c) = pure $ VConst c
 eval e@(Fn s (_, ds)) = do

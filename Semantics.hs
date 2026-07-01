@@ -343,7 +343,7 @@ match' (Block (_, ds)) _ = do
   mayFail $ \case
     (VStruct fs) -> mapM_ ($ fs) ms
     _ -> matchFail
-match' p@(App s (Id _ _ Con con) as) kn = do -- Can't avoid the match now
+match' p@(App s (Id _ _ Con con : as)) kn = do -- Can't avoid the match now
   let len = length as
       kns = const Unknown <$> as -- TODO: known con args
   (m, fs) <- matches' as kns
@@ -359,7 +359,7 @@ match' p@(App s (Id _ _ Con con) as) kn = do -- Can't avoid the match now
       | len /= n && con == cn ->
           spanError s ("Constructor pat expected arity "++show n ++ ": "++showPp p) sp
     _ -> matchFail)
-match' p@(App s _ _) _ = matchError s ("No constructor at head of pattern "++showPp p)
+match' p@(App s _) _ = matchError s ("No constructor at head of pattern "++showPp p)
 match' p _ = matchError (span p) ("Unrecognized pattern "++showPp p)
 
 matchField :: HasCallStack => (Span, Def) -> M (Map FieldName Value) ()
@@ -475,7 +475,7 @@ appDisjs s f ds knp = do
 
 eval :: HasCallStack => Exp -> EV
 eval (Id s _ _ i) = findEnv s i
-eval (App s e es) = do
+eval (App s (e : es)) = do
   e' <- eval e
   es' <- mapM eval es -- Effects need to be l -> r
   sPre <- spanPrefix s <$> expSP

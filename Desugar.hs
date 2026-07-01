@@ -32,9 +32,9 @@ desugarCon' :: Exp -> Exp -> Exp
 desugarCon' t (Paren _ e) = desugarCon' t e
 desugarCon' t i@(Id s _ Con _) = Asc s i t
 desugarCon' t (List s []) = Asc s (Id s Ident Con "[]") t
-desugarCon' t (App s (Paren _ e) ts) = desugarCon' t (App s e ts)
-desugarCon' t (App s (App _ e es) ts) = desugarCon' t (App s e (es <> ts))
-desugarCon' t (App s i@(Id _ _ Con _) ts) =
+desugarCon' t (App s (Paren _ e : ts)) = desugarCon' t (App s (e : ts))
+desugarCon' t (App s (App _ es : ts)) = desugarCon' t (App s (es <> ts))
+desugarCon' t (App s (i@(Id _ _ Con _) : ts)) =
   Asc s i (foldr (Arrow s) t ts)
 desugarCon' t (Asc s (Paren _ e) t') = desugarCon' t (Asc s e t')
 desugarCon' _ a@(Asc _ (Id _ _ Con _) _) = a
@@ -67,11 +67,10 @@ trimSigs [] = []
 -- TODO: decide which Asc survive type checking.
 desugarExp :: Exp -> Exp
 desugarExp e@(Id _ _ _ _) = e
-desugarExp (App s e1 es) = do
-  let es' = fmap desugarExp es
-  case desugarExp e1 of
-    App _ e es'' -> App s e (es'' <> es')
-    e -> App s e es'
+desugarExp (App s es) =
+  case desugarExp <$> es of
+    (App _ es'' : es') -> App s (es'' <> es')
+    es' -> App s es'
 desugarExp (Fn s ds) = Fn s (desugarFMatch ds)
 desugarExp (Asc _ e _) = e
 desugarExp (Arrow _ _ _) = error "Desugar: Arrow"
@@ -95,7 +94,7 @@ desugarExp (Paren _ e) = desugarExp e
 desugarExp (Tuple s es) = Tuple s (desugarExp <$> es)
 desugarExp (List s []) = Id s Ident Con "[]"
 desugarExp (List s (e:es)) =
-  App s (Id s Op Con "::") [desugarExp e, desugarExp (List s es)]
+  App s [Id s Op Con "::", desugarExp e, desugarExp (List s es)]
 desugarExp (Do s p e ds) = Do s (desugarPat p) (desugarExp e) (desugarDefs ds)
 desugarExp (Assign s l e) = Assign s (desugarExp l) (desugarExp e)
 desugarExp (Block ds) = Block (desugarDefs ds)
@@ -105,21 +104,20 @@ desugarExp (OpExp _ e) = e
 -- decl information and definitely requires gensym.
 desugarPat :: Exp -> Exp
 desugarPat e@(Id _ _ _ _) = e
-desugarPat (App s e1 es) = do
-  let es' = fmap desugarPat es
-  case desugarPat e1 of
-    App _ e es'' -> App s e (es'' <> es')
-    e -> App s e es'
+desugarPat (App s es) =
+  case desugarPat <$> es of
+    (App _ es'' : es') -> App s (es'' <> es')
+    es' -> App s es'
 desugarPat (Asc _ e _) = e
 desugarPat e@(Wild _) = e
 desugarPat e@(Const _ _) = e
 desugarPat (Dot s es) = Dot s (fmap desugarPat es)
 desugarPat (Paren _ e) = desugarPat e
 desugarPat (Tuple s []) = Id s Ident Con "()"
-desugarPat (Tuple s es) = App s (Id s Ident Con "()") es
+desugarPat (Tuple s es) = App s (Id s Ident Con "()" : es)
 desugarPat (List s []) = Id s Ident Con "[]"
 desugarPat (List s (e:es)) =
-  App s (Id s Op Con "::") [desugarPat e, desugarPat (List s es)]
+  App s [Id s Op Con "::", desugarPat e, desugarPat (List s es)]
 desugarPat (Block ds) = Block (desugarStructPat ds)
 desugarPat (OpExp _ e) = e
 desugarPat e = error ("Residual exp in pat "++showPp e)
@@ -137,8 +135,8 @@ desugarOneFMatch (Def t@(Tuple _ []) e) =
   Def (desugarPat t) e
 desugarOneFMatch (Def t@(Tuple s _) e) =
   Def (Paren s (desugarPat t)) e
-desugarOneFMatch (Def (App s p ps) e) =
-  Def (App s (desugarPat p) (fmap desugarPat ps)) (desugarExp e)
+desugarOneFMatch (Def (App s ps) e) =
+  Def (App s (fmap desugarPat ps)) (desugarExp e)
 desugarOneFMatch d = desugarOneMatch d
 
 -- Case (single-arg) match

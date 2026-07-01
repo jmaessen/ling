@@ -344,7 +344,7 @@ match' c@(Const _ (EChar _)) (_, nm) sfail = mayFail $ do
 match' (Block (_, ds)) (_, name) sfail = do
   ms <- traverse (\d -> matchField name d sfail) ds
   pure (foldr (meet . fst) AlwaysSucceeds ms, traverse_ snd ms)
-match' (App _ (Id s _ Con con) as) (kn, nm) cfail = matchCon s con as (kn, nm) cfail
+match' (App _ (Id s _ Con con : as)) (kn, nm) cfail = matchCon s con as (kn, nm) cfail
 match' p _ _ = matchError (span p) ("Unrecognized pattern "++showPp p)
 
 matchCon :: HasCallStack => Span -> Var -> [Pat] -> M (Known, Name)
@@ -553,7 +553,7 @@ eval (Id s _ _ i) k = do
         pure . aDesc . pp . n_ $ en
       gen _ = pure . pp . n_ $ en
   pure (kn_ en, cont k $ gen en)
-eval (App s e es) k = apply s (eval e) (eval <$> es) k
+eval (App s (e : es)) k = apply s (eval e) (eval <$> es) k
 eval (Const s c) k = do
   act <- valueToCode s (VConst c) k
   pure (KnownValue $ VConst c, act)
