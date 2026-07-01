@@ -12,16 +12,22 @@
 #define LING_INLINE inline
 #endif
 
+union ling_obj;
+
+typedef struct {
+  unsigned char arity;
+  union ling_obj (*func)();
+  char *name;
+} ling_desc;
+
 typedef union ling_obj {
   const union ling_obj *ref;
   intptr_t int_val;
   uintptr_t uint_val;
   double double_val;
   char *string;
-  union ling_obj (*func)();
+  const ling_desc *desc;
 } ling_obj;
-
-typedef ling_obj ling_desc[4];
 
 typedef struct ling_buf {
   // Ordered for hot fields first
@@ -49,21 +55,20 @@ typedef struct ling_context {
 #define LING_UINT(u)  (ling_obj){ .uint_val = u }
 #define LING_FLOAT(f) (ling_obj){ .double_val = f }
 #define LING_STR(str) (ling_obj){ .string = str }
-#define LING_DESC(d)  (ling_obj){ .ref = (const ling_obj *)d }
+#define LING_DESC(d)  (ling_obj){ .desc = d }
 #define LING_FUNC(f)  (ling_obj){ .func = f }
 
-#define LING_MK_DESC(desc, arity, func, name) \
-  { LING_DESC(desc), LING_UINT(arity), LING_FUNC(func), LING_STR(name) }
+#define LING_MK_DESC(arity, func, name) { arity, func, name }
 
 // Fixed descriptors
 extern const ling_desc ling_tuples[33]; // 0 through 32
 extern const ling_desc ling_pAps[1][31];   // 1 through 31
 
-extern const ling_desc _0p_CC; // Cons
-extern const ling_desc Nil;
+extern const ling_desc _0p_CC[]; // Cons
+extern const ling_desc Nil[];
 
-extern const ling_desc False;
-extern const ling_desc True;
+extern const ling_desc False[];
+extern const ling_desc True[];
 
 // General apply
 ling_obj ling_apply(ling_context *ctxt, ling_obj clo, uintptr_t nargs, ling_obj *args);
@@ -113,8 +118,8 @@ LING_INLINE char *ling_alloc_string(ling_context *ctxt, size_t n) {
   return ling_buf_alloc_string(&ctxt->heap, n);
 }
 
-LING_INLINE int ling_desc_is(const ling_desc desc, ling_obj r) {
-  return (r.ref[0].ref == &desc[0]);
+LING_INLINE int ling_desc_is(const ling_desc *desc, ling_obj r) {
+  return (r.ref[0].desc == desc);
 }
 
 LING_INLINE ling_obj ling_field(ling_obj r, uintptr_t i) {
@@ -123,7 +128,7 @@ LING_INLINE ling_obj ling_field(ling_obj r, uintptr_t i) {
 
 LING_INLINE ling_obj *ling_mk_env(ling_context *ctxt, uintptr_t arity) {
   ling_obj *res = ling_alloc_object(ctxt, arity);
-  res[0].ref = &ling_tuples[arity][0];
+  res[0].desc = &ling_tuples[arity];
   return res;
 }
 
@@ -131,32 +136,32 @@ LING_INLINE void ling_fill_env(uintptr_t arity, ling_obj *res, ling_obj *vals) {
   memcpy(res + 1, vals, arity * sizeof(ling_obj));
 }
 
-LING_INLINE ling_obj ling_new_obj(ling_context *ctxt, const ling_desc desc, ling_obj *args) {
-  uintptr_t arity = desc[1].uint_val;
+LING_INLINE ling_obj ling_new_obj(ling_context *ctxt, const ling_desc *desc, ling_obj *args) {
+  uintptr_t arity = desc->arity;
   ling_obj *res = ling_alloc_object(ctxt, arity);
 
-  res[0].ref = &desc[0];
+  res[0].desc = desc;
   ling_fill_env(arity, res, args);
   return LING_REF(res);
 }
 
-LING_INLINE ling_obj ling_pap(ling_context *ctxt, const ling_desc desc, uintptr_t arity, ling_obj *args) {
+LING_INLINE ling_obj ling_pap(ling_context *ctxt, const ling_desc *desc, uintptr_t arity, ling_obj *args) {
   ling_obj *res = ling_alloc_object(ctxt, arity + 1);
 
-  res[0].ref = &ling_pAps[0][arity - 1][0];
-  res[1].ref = &desc[0];
+  res[0].desc = &ling_pAps[0][arity - 1];
+  res[1].desc = desc;
   memcpy(res + 2, args, arity * sizeof(ling_obj));
   return LING_REF(res);
 }
 
 LING_INLINE int ling_is_tuple(uintptr_t arity, ling_obj r) {
-  return ling_desc_is(ling_tuples[arity], r);
+  return ling_desc_is(&ling_tuples[arity], r);
 }
 
 LING_INLINE ling_obj ling_tuple(ling_context *ctxt, uintptr_t arity, ling_obj *args) {
   ling_obj *res = ling_alloc_object(ctxt, arity);
 
-  res[0].ref = &ling_tuples[arity][0];
+  res[0].desc = &ling_tuples[arity];
   ling_fill_env(arity, res, args);
   return LING_REF(res);
 }
@@ -175,23 +180,23 @@ noreturn ling_obj ling_match_error(char *);
 
 // Some primitives
 #define P1_DECL(name) \
-  extern const ling_desc name; \
+  extern const ling_desc name[]; \
   ling_obj name##_FUNC(ling_context *, ling_obj)
 
 #define P2_DECL(name) \
-  extern const ling_desc name; \
+  extern const ling_desc name[]; \
   ling_obj name##_FUNC(ling_context *, ling_obj, ling_obj)
 
 #define P3_DECL(name) \
-  extern const ling_desc name; \
+  extern const ling_desc name[]; \
   ling_obj name##_FUNC(ling_context *, ling_obj, ling_obj, ling_obj)
 
 #define P1(name)                                          \
-  extern const ling_desc name; \
+  extern const ling_desc name[]; \
   LING_INLINE ling_obj name##_FUNC(ling_context *ctxt, ling_obj a)
 
 #define P2(name) \
-  extern const ling_desc name; \
+  extern const ling_desc name[]; \
   LING_INLINE ling_obj name##_FUNC(ling_context *ctxt, ling_obj a, ling_obj b)
 
 P2_DECL(strAppend);
@@ -209,7 +214,7 @@ P2(byteAt) {
 
 P2(strEq) {
   int r = strcmp(a.ref->string, b.ref->string);
-  return LING_REF(r == 0 ? True : False);
+  return LING_DESC(r == 0 ? True : False);
 }
 
 P3_DECL(substr);
@@ -217,7 +222,7 @@ P1_DECL(strConcat);
 
 P1(putStr) {
   fputs(a.string, stdout);
-  return LING_REF(&ling_tuples[0][0]);
+  return LING_DESC(&ling_tuples[0]);
 }
 
 P1_DECL(lingDump);
@@ -226,13 +231,13 @@ P1_DECL(lingDump);
 LING_INLINE ling_obj name##_FUNC(ling_context *_ctxt, ling_obj a, ling_obj b) { \
   return LING_INT(a.int_val op b.int_val);                                 \
 } \
-extern const ling_desc name
+extern const ling_desc name[]
 
 #define PRIM_II_B(name, op) \
 LING_INLINE ling_obj name##_FUNC(ling_context *_ctxt, ling_obj a, ling_obj b) { \
-  return LING_REF(a.int_val op b.int_val ? True : False);                  \
+  return LING_DESC(a.int_val op b.int_val ? True : False);                  \
 } \
-extern const ling_desc name
+extern const ling_desc name[]
 
 PRIM_II_I(intAdd, +);
 PRIM_II_I(intSub, -);

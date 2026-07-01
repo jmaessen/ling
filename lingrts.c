@@ -91,22 +91,22 @@ noreturn static void ling_bad_intToStr(void) {
 }
 
 #define P1(name) \
-  const ling_desc name = LING_MK_DESC( &name, 1, name##_FUNC, #name ); \
+  const ling_desc name[] = { LING_MK_DESC( 1, name##_FUNC, #name ) };   \
   ling_obj name##_FUNC(ling_context *ctxt, ling_obj a)
 
 #define P2(name) \
-  const ling_desc name = LING_MK_DESC( &name, 2, name##_FUNC, #name ); \
+  const ling_desc name[] = { LING_MK_DESC( 2, name##_FUNC, #name ) };   \
   ling_obj name##_FUNC(ling_context *ctxt, ling_obj a, ling_obj b)
 
 #define P3(name)               \
-  const ling_desc name = LING_MK_DESC( &name, 3, name##_FUNC, #name ); \
+  const ling_desc name[] = { LING_MK_DESC( 3, name##_FUNC, #name ) };   \
   ling_obj name##_FUNC(ling_context *ctxt, ling_obj a, ling_obj b, ling_obj c)
 
 #define P1_DESC(name) \
-  const ling_desc name = LING_MK_DESC( &name, 1, name##_FUNC, #name )
+  const ling_desc name[] = { LING_MK_DESC( 1, name##_FUNC, #name ) }
 
 #define P2_DESC(name) \
-  const ling_desc name = LING_MK_DESC( &name, 2, name##_FUNC, #name )
+  const ling_desc name[] = { LING_MK_DESC( 2, name##_FUNC, #name ) }
 
 P2(strAppend) {
   char *res = ling_alloc_string(ctxt, strlen(a.string) + strlen(b.string));
@@ -154,7 +154,7 @@ P3(substr) {
 /* Concatenate a list of strings */
 P1(strConcat) {
   ling_buf buf = ling_obj_buffer(ctxt);
-  for (; a.ref != Nil; a.ref = a.ref[2].ref) {
+  for (; a.desc != Nil; a.ref = a.ref[2].ref) {
     ling_buffer_append_string(&buf, a.ref[1].string);
   }
   return LING_STR((char *)ling_buffer_finalize(ctxt, buf));
@@ -184,9 +184,9 @@ ling_obj ling_apply(ling_context *ctxt, ling_obj clo,
   ling_obj *args = args_base;
   uintptr_t margs = nargs;
   while (nargs > 0) {
-    const ling_obj *clo_desc = clo.ref[0].ref;
-    if (&ling_pAps[0][0][0] <= clo_desc && clo_desc < &ling_pAps[1][0][0]) {
-      uintptr_t pap_arity = 1 + ((ling_desc *)clo_desc - (&ling_pAps[0][0]));
+    const ling_desc *clo_desc = clo.ref[0].desc;
+    if (&ling_pAps[0][0] <= clo_desc && clo_desc < &ling_pAps[1][0]) {
+      uintptr_t pap_arity = 1 + (clo_desc - (&ling_pAps[0][0]));
       if (pap_arity + nargs > margs) {
         margs = (nargs + pap_arity) * 2;
         args_base = alloca(margs * sizeof(ling_obj));
@@ -198,7 +198,7 @@ ling_obj ling_apply(ling_context *ctxt, ling_obj clo,
       memcpy(args, clo.ref + 2, pap_arity * sizeof(ling_obj));
       clo = clo.ref[1];
     }
-    uintptr_t arity = clo.ref[1].uint_val;
+    uintptr_t arity = clo.desc->arity;
     if (arity == nargs) {
       return fapply(ctxt, clo, args);
     } else if (arity < nargs) {
@@ -207,7 +207,7 @@ ling_obj ling_apply(ling_context *ctxt, ling_obj clo,
       nargs -= arity;
     } else {
       // pAp
-      return ling_pap(ctxt, clo.ref, nargs, args);
+      return ling_pap(ctxt, clo.desc, nargs, args);
     }
   }
   return clo;
@@ -284,8 +284,8 @@ inline static int inHeap(ling_context *ctxt, ling_obj o) {
 
 inline static int looksLikeHeader(struct dumpmetadata *md, ling_obj o) {
   return inInitData(md, o) && aligned(o) &&
-    0 <= o.ref[1].int_val && o.ref[1].int_val < 32 &&
-    inInitData(md, o.ref[3]) && strnlen(o.ref[3].string, 50) < 50;
+    0 <= o.desc->arity && o.desc->arity < 32 &&
+    inInitData(md, LING_STR(o.desc->name)) && strnlen(o.desc->name, 50) < 50;
 }
 
 static void dump_rec(ling_context *ctxt, struct dumpmetadata *md,
@@ -295,13 +295,13 @@ static void dump_rec(ling_context *ctxt, struct dumpmetadata *md,
     if (inHeap(ctxt, o)) {
       const ling_obj *p = o.ref;
       const ling_obj desc = p[0];
-      const ling_obj *dr = desc.ref;
-      if (!looksLikeHeader(md, desc) || dr[1].int_val <= 0) {
+      const ling_desc *dr = desc.desc;
+      if (!looksLikeHeader(md, desc) || dr->arity <= 0) {
         printf("%*s\"%.50s\"%s", lvl * 2, "", o.string, sep);
         break;
       }
-      printf("%*s%.50s%s", lvl * 2, "", dr[3].string, sep);
-      const uintptr_t arity = dr[1].uint_val;
+      printf("%*s%.50s%s", lvl * 2, "", dr->name, sep);
+      const uintptr_t arity = dr->arity;
       for (int i = 1; i < arity; ++i) {
         dump_rec(ctxt, md, p[i], lvl + 1, 0);
       }
@@ -309,7 +309,7 @@ static void dump_rec(ling_context *ctxt, struct dumpmetadata *md,
       continue;
     } else if (inInitData(md, o)) {
       if (looksLikeHeader(md, o)) {
-        printf("%*s%.50s%s", lvl * 2, "", o.ref[3].string, sep);
+        printf("%*s%.50s%s", lvl * 2, "", o.desc->name, sep);
       } else {
         // Assume other static data is string data, which
         // is actually subtly wrong as we can pre-compile
@@ -329,7 +329,7 @@ P1(lingDump) {
   struct dumpmetadata md;
   dump_metadata_init(&md);
   dump_rec(ctxt, &md, a, 0, 0);
-  return LING_REF(&ling_tuples[0][0]);
+  return LING_DESC(&ling_tuples[0]);
 }
 
 int main(int argc, char *argv[]) {

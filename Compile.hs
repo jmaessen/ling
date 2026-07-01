@@ -224,8 +224,8 @@ conBinding i nm d@(Desc _ a _ _) act = do
       gen'
         | a == 0 =
           toplevel
-            (hsep ["const", "ling_desc", pp nm, equals] <+>
-             (cCall "LING_MK_DESC" [ pp nm, int a, "NULL", text (show i)] <> semi))
+            (hsep ["const", "ling_desc", (pp nm <> "[]"), equals] <+>
+             (cArray [cCall "LING_MK_DESC" [ int a, "NULL", text (show i)]] <> semi))
         | otherwise = do
           let as = fmap (N "arg" "arg") [0..toInteger a - 1]
           mkFnDecl nm a
@@ -329,7 +329,7 @@ match' (Id _ _ Con con) (KnownValue (VCon0 con'), _) _
 match' (Id _ _ Con   _) (KnownValue _, _) sfail = alwaysFail sfail
 match' (Id s _ Con con) (_, nm) sfail = do
   cname <- funName s con
-  mayFail $ stmt $ cIf (hsep [pp cname, "!=", gRef(pp nm)]) sfail
+  mayFail $ stmt $ cIf (hsep [pp cname, "!=", gDesc(pp nm)]) sfail
 match' (Const _ c) (KnownValue (VConst c'), _) _
   | c == c' = alwaysSucceed
 match' (Const _ _) (KnownValue _, _) sfail = alwaysFail sfail

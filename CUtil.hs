@@ -8,7 +8,7 @@ module CUtil(
   Label, cLabel, cGoto,
   cMatchError,
   cDesc, cDescRHS,
-  gRef, gString, gInt, gFloat, gChar,
+  gRef, gString, gInt, gFloat, gChar, gDesc,
   aDesc
 ) where
 import AST(Var, PP(..))
@@ -80,15 +80,18 @@ cMatchError sloc = cReturn (cCall "ling_match_error" [text (show sloc)])
 -- Static descriptor value
 cDesc :: Doc -> Var -> Int -> Code
 cDesc mangled name arity =
-  hsep ["const", "ling_desc", mangled, equals] <+> (cDescRHS mangled name arity <> semi)
+  hsep ["const", "ling_desc", mangled <> "[]", equals] <+> (cDescRHS mangled name arity <> semi)
 
 cDescRHS :: Doc -> Var -> Int -> Code
 cDescRHS mangled name arity =
-  cCall "LING_MK_DESC" [ mangled, int arity, "&"<>funcOf mangled, text (show name)]
+  cArray [cCall "LING_MK_DESC" [ int arity, "&"<>funcOf mangled, text (show name)]]
 
 -- getter forms
 gRef :: Doc -> Code
 gRef = (<> ".ref")
+
+gDesc :: Doc -> Code
+gDesc = (<> ".desc")
 
 gString :: Doc -> Code
 gString = (<> ".string")

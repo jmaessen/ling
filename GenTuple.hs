@@ -12,7 +12,7 @@ noFunc = "NULL"
 
 genTupleDesc :: Int -> Doc
 genTupleDesc n =
-  cCall "LING_MK_DESC" ["ling_tuples["<>int n<>"]", int n, noFunc, text $ show $ name n]
+  cCall "LING_MK_DESC" [int n, noFunc, text $ show $ name n]
     where name 0 = "()"
           name 1 = "(_,)"
           name _ = "(" <> replicate (n-1) ',' <> ")"
@@ -26,8 +26,7 @@ genTuples n =
 
 genPApDesc :: Int -> Doc
 genPApDesc n =
-  cCall "LING_MK_DESC" ["ling_pAps[0][" <> int (n-1) <> "]",
-                        int (n + 1), noFunc, text $ show ("pAp" <> show n)]
+  cCall "LING_MK_DESC" [int (n + 1), noFunc, text $ show ("pAp" <> show n)]
 
 genPAps :: Int -> Doc
 genPAps n =
@@ -52,8 +51,8 @@ genApply n = do
             "(*(ling_obj (*)("<>cCommas ("ling_context *" : replicate k "ling_obj")<>"))f)",
             parens (cCommas (pp contextArg : ((\i -> hcat ["args[", int i, rbrack]) <$> [0..k-1])))<>semi]]]]
     body = vcat [
-      "uintptr_t arity = clo.ref[1].uint_val;",
-      "ling_obj (*f)() = clo.ref[2].func;",
+      "uintptr_t arity = clo.desc->arity;",
+      "ling_obj (*f)() = clo.desc->func;",
       "switch (arity) {",
       vcat (fmap arm [1..n]),
       "  default: return ling_match_error(\"Arity too large in apply.  \");",
