@@ -45,9 +45,7 @@ this is `focusOwned`.
 
 We add a couple of refinements:
 * We provide a vector interface with push/pop and monoidal append
-  (which left-updates).  Right now only pop adds undo log entries,
-  since we know the other entries can safely be ignored, but it would
-  be safer for space to annull those if we expect a lot of rollbacks.
+  (which left-updates).
 * We track undo log size and copy when it equals the current backing
   store size.  This probably ought to be related to the size of the
   underlying vec instead.

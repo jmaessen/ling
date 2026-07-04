@@ -559,7 +559,7 @@ eval (Const s c) k = do
   pure (KnownValue $ VConst c, act)
 eval e@(Fn s (_, ds)) k = withDiffEnv $ do
   name <- withName "anon_fn"
-  (a, cs) <- mkRhs s ds <$> expSP
+  let (a, cs) = mkRhs ds
   info@(pack, _, _) <- closed (fv e)
   (kn, act) <- vClo s name a info cs k
   pure (kn, vCloDecl name a info >> pack >> act)
@@ -582,8 +582,7 @@ eval (Tuple s es) k = do
 eval (Case s e (_,es)) k = do
   bv <- withName "case_disc"
   (ekn, e') <- eval e (Bind bv)
-  sp <- expSP
-  (kn, m) <- locally $ appDisjs s (map (toDisj sp) es) [(ekn, bv)] k
+  (kn, m) <- locally $ appDisjs s (map toDisj es) [(ekn, bv)] k
   pure (kn, stmt (cObjDecl bv) >> e' >> m)
 eval (Block b) k = locally (evDefs b k)
 eval e _ = expError (span e) ("eval: Unhandled expression\n  "++showPp e++"\n  "++show e)
@@ -637,7 +636,7 @@ evGroups (g : _) _ = error ("Unexpected group "++showPp g)
 -- Bind closures for fs, assumes we're already in a fixed-point env.
 evFns :: HasCallStack => [GroupFun] -> E ([(Var, (Known, Name))], CG ())
 evFns fs = do
-  named <- traverse (\(s, v, a, cs) -> (, s, v, a, cs) <$> withName v) fs
+  named <- traverse (\(s, v, a, _, cs) -> (, s, v, a, cs) <$> withName v) fs
   ci@(mkEnv, _, _) <- closed (fv (Fns fs))
   let clo (n, s, v, a, cs) = do
         n' <- if hasEnv ci then withName (v<>"_IMP") else pure n

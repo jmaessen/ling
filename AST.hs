@@ -33,8 +33,12 @@ instance Eq Span where
   _ == _ = True
 
 instance Semigroup Span where
+  S 0 0 <> b = b
+  a <> S 0 0 = a
   S p0 p1 <> S p2 p3 = S (min p0 p1) (max p2 p3)
 
+instance Monoid Span where
+  mempty = noSpan
 
 data Mod = Mod SourcePos Defs Imports Defs
   deriving (Eq, Show)
@@ -425,7 +429,7 @@ instance IsAST Def where
   allSpans (Def p e) = allSpans2 p e
   allSpans (Data p ds) = allSpans2 p ds
   allSpans (Struct p ds) = allSpans2 p ds
-  allSpans (Fix _ _ _) = []
+  allSpans (Fix _ _ (s, _)) = [s]
   fullParen (BindExp e) = BindExp (fpe e)
   fullParen (Def pat e) = Def (fpe pat) (fpe e)
   fullParen (Data pat ds) = Data (fpe pat) (fp ds)
@@ -533,7 +537,7 @@ isDisjunct (s, _) = [(s, "Not a valid case disjunct")]
 type Arity = Int
 
 type Clause = ([Pat], Exp)
-type GroupFun = (Span, Var, Arity, [Clause])
+type GroupFun = (Span, Var, Arity, Maybe Exp, [Clause])
 data DefGroup
   = D Def
   | Fns [GroupFun]
@@ -545,10 +549,11 @@ instance PP DefGroup where
   pp (Record m) = pp [(Def (Id noSpan Ident Var f) e) | (f, e) <- M.toList m]
   pp (Fns m) = PP.vcat $ concat [
     ["-- Group:"],
-    [pp $ Def (App s (i:ps)) e |
-      (s, nm, _, pes) <- m,
+    [pp d |
+      (s, nm, _, sig, pes) <- m,
       let i = Id s Ident Var nm,
-      (ps, e) <- pes ],
+      d <- maybe id (\t -> (BindExp (Asc (span t) i t):)) sig $
+           [ Def (App s (i:ps)) e | (ps, e) <- pes ]],
     ["-- End group"]]
 
 instance IsAST DefGroup where
@@ -556,28 +561,31 @@ instance IsAST DefGroup where
   isValid (Record m) = concatMap isValid (M.elems m)
   isValid (Fns gs) =
     [ err |
-      (_, _, _, ds) <- gs,
+      (_, _, _, sig, ds) <- gs,
       (as, e) <- ds,
-      err <- concatMap isPat as <> isValid e ]
+      err <- maybe [] isTy sig <> concatMap isPat as <> isValid e ]
   span (D d) = span d
   span (Record m) = foldl1 (<>) (span <$> M.elems m)
-  span (Fns gs) = foldl1 (<>) [ s | (s, _, _, _) <- gs]
+  span (Fns gs) = foldl1 (<>) [ s | (s, _, _, _, _) <- gs]
   allSpans (D d) = allSpans d
   allSpans (Record m) = concatMap allSpans $ M.elems m
   allSpans (Fns gs) =
-    [ s | (s0, _, _, ds) <- gs,
-          s <- s0 : [ s1 | (as, e) <- ds, s1 <- allSpans as <> allSpans e]]
+    [ s | (s0, _, _, sig, ds) <- gs,
+          s <- s0 : maybe [] allSpans sig <>
+               [ s1 | (as, e) <- ds, s1 <- allSpans as <> allSpans e]]
   fullParen (D d) = D (fullParen d)
   fullParen (Record m) = Record (fullParen <$> m)
   fullParen (Fns gs) =
-    Fns [ (s, v, a, [(fullParen as, fullParen e) | (as, e) <- ds]) |
-          (s,v,a,ds) <- gs ]
+    Fns [ (s, v, a, fullParen <$> sig,
+           [(fullParen as, fullParen e) | (as, e) <- ds]) |
+          (s,v,a,sig,ds) <- gs ]
   noParen (D d) = D (noParen d)
   noParen (Record m) = Record (noParen <$> m)
   noParen (Fns gs) =
-    Fns [ (s, v, a, [(noParen as, noParen e) | (as, e) <- ds]) |
-          (s,v,a,ds) <- gs ]
-  fv (Fns fs) = S.unions [ fv e `difference` fv ps | (_, _, _, rs) <- fs, (ps, e) <- rs ]
+    Fns [ (s, v, a, noParen <$> sig, [(noParen as, noParen e) | (as, e) <- ds]) |
+          (s,v,a,sig,ds) <- gs ]
+  fv (Fns fs) = S.unions [ fv e `difference` fv ps |
+                           (_, _, _, _, rs) <- fs, (ps, e) <- rs ]
   fv g = fvGroup g mempty
 
 fvDefs :: Defs -> Set Var
@@ -594,7 +602,7 @@ fvGroup (D (BindExp (Asc s (Paren _ e) t))) later = fvGroup (D (BindExp (Asc s e
 fvGroup (D (Def pat e)) later = fv e <> (later `difference` fv pat)
 fvGroup (D d) later = later <> fv d
 fvGroup (Fns fs) later = (later <> rhs) `difference` vs
-  where vs = S.fromList [ v | (_, v, _, _) <- fs ]
+  where vs = S.fromList [ v | (_, v, _, _, _) <- fs ]
         rhs = fv (Fns fs)
 
 groupDefs :: HasCallStack => Defs -> Either ValidErrs [DefGroup]
@@ -604,20 +612,42 @@ groupDefs (_, ds) =
     r -> r
 
 groupDef :: HasCallStack => (Span, Def) -> Either ValidErrs [DefGroup] -> Either ValidErrs [DefGroup]
-groupDef (s, Def (App s' (Asc _ p _ : ps)) e) ts =
-  groupDef (s, Def (App s' (p : ps)) e) ts
+-- groupDef (s, Def (App s' (Asc _ p t : ps)) e) ts =
+--   groupDef (s, Def (App s' (p : ps)) e) ts
+-- Turn in-expr ascriptions into standalone
+groupDef (s, Def a@(Asc s' i@(Id _ _ Var _) _) e) ts =
+  groupDef (s', BindExp a) $ groupDef (s, Def i e) ts
+groupDef (s, Def i@(Id _ _ _ _) (Asc s' e t)) ts =
+  groupDef (s', BindExp (Asc s' i t)) $ groupDef (s, Def i e) ts
+-- App flattening to improve binding group identification
 groupDef (s, Def (App s' (App _ ps : ps')) e) ts =
   groupDef (s, Def (App s' (ps ++ ps')) e) ts
-groupDef (s, Def (App _ (Id _ _ Var f : ps)) e) (Right (Fns ((s', ff, n, pes): fns) : ts))
+-- Binding group handling.  Fndef with existing group
+groupDef (s, Def (App _ (Id _ _ Var f : ps)) e)
+         (Right (Fns (c@(s', ff, n, sig, pes): fns) : ts))
   | f == ff =
-    if n /= length ps then
+    if sig /= Nothing then
+      Left [(s, ("Partial definition before signature of "<>f))]
+    else if n /= length ps then
       Left [(s, ("Arity mismatch in definition of " <> f))]
     else
-      Right (Fns ((s <> s', ff, n, (ps, e):pes) : fns) : ts)
-  | otherwise = Right (Fns ((s, f, length ps, [(ps, e)]) : (s', ff, n, pes) : fns) : ts)
+      Right (Fns ((s <> s', ff, n, Nothing, (ps, e):pes) : fns) : ts)
+  | otherwise =
+    Right (Fns ((s, f, length ps, Nothing, [(ps, e)]) : c : fns) : ts)
+-- New fndef binding group
 groupDef (s, Def (App _ (Id _ _ Var f : ps)) e) (Right ts) =
-  Right (Fns [(s, f, length ps, [(ps, e)])] : ts)
-groupDef (s, Def i@(Id _ _ _ _) (Asc _ e _)) ts = groupDef (s, Def i e) ts
+  Right (Fns [(s, f, length ps, Nothing, [(ps, e)])] : ts)
+-- Ascription in binding group
+groupDef (s, BindExp (Asc _ (Id _ _ Var f) t))
+         (Right (Fns ((s', ff, n, sig, pes): fns) : ts))
+  | f == ff =
+    case sig of
+      Just sg ->
+        Left [(s, ("Doubled signature for " <> f)), (span sg, "Second signature")]
+      Nothing ->
+        Right (Fns ((s', ff, n, Just t, pes): fns) : ts)
+groupDef (_, a@(BindExp (Asc _ (Id _ _ Var _) _))) (Right (Fns m : bs)) =
+  Right (Fns m : D a : bs)
 groupDef (s, Def i@(Id _ _ _ _) (Paren _ e)) ts = groupDef (s, Def i e) ts
 groupDef (s, Def (Id _ _ Var f) (Fn _ ds)) (Right (Fns m : bs)) =
   Right (Fns (fnToGroup s f ds : m) : bs)
@@ -625,8 +655,6 @@ groupDef (s, Def (Id _ _ Var f) (Fn _ ds)) (Right bs) =
   Right (Fns [fnToGroup s f ds] : bs)
 groupDef (s, BindExp (Asc s' (Paren _ e) t)) ts =
   groupDef (s, BindExp (Asc s' e t)) ts
-groupDef (_, a@(BindExp (Asc _ (Id _ _ Var _) _))) (Right (Fns m : bs)) =
-  Right (Fns m : D a : bs)
 groupDef (_, Def (Id _ _ Var var) e) (Right []) = Right [Record (M.singleton var e)]
 groupDef (_, Def (Id _ _ Var var) e) (Right [Record m]) = Right [Record (M.insert var e m)]
 groupDef (s, d) (Right (Record _ : _)) = Left [(s, fromString (show (pp d)) <> " is not a struct binding")]
@@ -635,8 +663,8 @@ groupDef (s, Def (Asc _ p _) e) ts = groupDef (s, Def p e) ts
 groupDef (_, d) (Right ts) = Right (D d : ts)
 groupDef _ (Left e) = Left e
 
-fnToGroup :: Span -> Var -> Defs -> (Span, Var, Arity, [Clause])
-fnToGroup s f (_, ds) = (s, f, aty cs, cs) where
+fnToGroup :: Span -> Var -> Defs -> (Span, Var, Arity, Maybe Exp, [Clause])
+fnToGroup s f (_, ds) = (s, f, aty cs, Nothing, cs) where
   cs :: [Clause] = map (defToClause . snd) ds
   aty [] = error "Empty clauses"
   aty ((ps,_):_) = length ps

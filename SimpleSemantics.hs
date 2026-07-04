@@ -215,15 +215,14 @@ eval (App s (e:es)) = do
   apply s (eval e) (eval <$> es)
 eval (Const _ c) = pure $ VConst c
 eval e@(Fn s (_, ds)) = do
-  (a, cs) <- mkRhs s ds <$> expSP
+  let (a, cs) = mkRhs ds
   vClo s "<anon>" a (fv e) cs
 eval (Tuple _ es) = do
   let d = conDesc "()" (length es)
   VObj d <$> args (fmap eval es)
 eval (Case s e (_,es)) = do
   v <- eval e
-  sp <- expSP
-  appDisjs s "<case>" (map (toDisj sp) es) [v]
+  appDisjs s "<case>" (map toDisj es) [v]
 eval (Block b) = evDefs b
 eval e = expError (span e) ("eval: Unhandled expression\n  "++showPp e++"\n  "++show e)
 
@@ -238,7 +237,7 @@ evDefs b =
 evGroups :: HasCallStack => [DefGroup] -> E Value
 evGroups [] = pure $ VStruct mempty
 evGroups (Fns fs:ts) = fixEnv (traverse clo fs) (evGroups ts)
-  where clo (s, v, n, cs) = (v,) <$> vClo s v n closeOver cs
+  where clo (s, v, n, _, cs) = (v,) <$> vClo s v n closeOver cs
         closeOver = fv (Fns fs)
 evGroups [Record m] = VStruct <$> mapM eval m
 evGroups [D (BindExp e)] = eval e

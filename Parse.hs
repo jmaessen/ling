@@ -34,7 +34,7 @@ data Spacing = NoNL | NL | BT | NoBlock deriving (Eq, Ord, Show)
 
 type SpanPos = Span -> (SourcePos, SourcePos)
 
-spanPos :: PosState ByteString -> Defs -> SpanPos
+spanPos :: HasCallStack => PosState ByteString -> Defs -> SpanPos
 spanPos ps ds =
   let spans = allSpans ds
       offsets = sort (0 : [ a | S a _ <- spans ] ++ [ b | S _ b <- spans ])
@@ -45,7 +45,8 @@ spanPos ps ds =
 showsPos :: Pos -> ShowS
 showsPos = shows . unPos
 
-spanPrefix :: Span -> SpanPos -> String
+spanPrefix :: HasCallStack => Span -> SpanPos -> String
+spanPrefix (S 0 0) _ = "unknown loc: "
 spanPrefix s sp =
   case sp s of
     (SourcePos f sline scol, SourcePos _ eline ecol) ->

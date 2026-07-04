@@ -482,7 +482,7 @@ eval (App s (e : es)) = do
   pure $ apply sPre e' es'
 eval (Const _ c) = pure (KnownValue $ VConst c, pure $ VConst c)
 eval e@(Fn s (_, ds)) = withDiffEnv $ do
-  (a, cs) <- mkRhs s ds <$> expSP
+  let (a, cs) = mkRhs ds
   vClo s "<anon>" a (fv e) cs
 eval (Tuple _ es) = do
   es' <- traverse eval es
@@ -493,8 +493,7 @@ eval (Tuple _ es) = do
   pure (kn, VObj d <$> args vs)
 eval (Case s e (_,es)) = do
   (ekn, e') <- eval e
-  sp <- expSP
-  (kn, m) <- locally $ appDisjs s "<case>" (map (toDisj sp) es) [ekn]
+  (kn, m) <- locally $ appDisjs s "<case>" (map toDisj es) [ekn]
   pure (kn, do
     v <- e'
     m [v])
@@ -514,7 +513,7 @@ evGroups [] = do
   let v = VStruct mempty
   pure (KnownValue v, pure v)
 evGroups (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evGroups ts)
-  where clo (s, v, n, cs) = (v,) <$> vClo s v n closeOver cs
+  where clo (s, v, n, _, cs) = (v,) <$> vClo s v n closeOver cs
         closeOver = fv (Fns fs)
 evGroups [Record m] = do
   ms <- locally $ traverse eval m

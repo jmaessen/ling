@@ -44,15 +44,18 @@ desugarCon' _ e = error ("not a constructor def "++showPp e)
 
 desugarGroup :: DefGroup -> [(Span, Def)]
 desugarGroup (D d) = desugarDef (span d, d)
-desugarGroup (Fns fns) = fmap desugarFunc fns
+desugarGroup (Fns fns) = concatMap desugarFunc fns
 desugarGroup (Record m) =
   [ (se, Def (Id se Ident Var i) (desugarExp e)) |
     (i, e) <- M.toAscList m,
     let se = span e ]
 
-desugarFunc :: (Span, Var, Arity, [([Exp], Exp)]) -> (Span, Def)
-desugarFunc (s, f, _, ps) =
-  (s, Def (Id s Ident Var f) (Fn s (s, fmap desugarClause ps)))
+desugarFunc :: (Span, Var, Arity, Maybe Exp, [([Exp], Exp)]) -> [(Span, Def)]
+desugarFunc (s, f, a, Just sig, ps) =
+  (s, BindExp (Asc (span sig) (Id s Ident Var f) sig)) :
+    desugarFunc (s, f, a, Nothing, ps)
+desugarFunc (s, f, _, Nothing, ps) =
+  [(s, Def (Id s Ident Var f) (Fn s (s, fmap desugarClause ps)))]
 
 desugarClause :: ([Exp], Exp) -> (Span, Def)
 desugarClause (ps, e) =
