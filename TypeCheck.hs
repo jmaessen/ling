@@ -8,15 +8,19 @@ import SemUtil(mkRhs, toDisj)
 import Control.Monad
 import Control.Monad.State
 import Data.BakerVec as BV hiding (replicate)
-import Data.ByteString.UTF8(toString)
+import Data.ByteString.Char8(replicate)
+import Data.ByteString.UTF8(fromString, toString)
 import Data.Foldable
-import Data.Map as M hiding ((!), null, foldr)
-import Data.Set as S hiding (null, foldr, fold)
+import Data.Map as M hiding ((!), null, foldl, foldr)
+import Data.Set as S hiding (null, foldl, foldr, fold)
 import GHC.Stack(HasCallStack)
-import Prelude hiding (span)
+import Prelude hiding (span, replicate)
 import Text.PrettyPrint hiding ((<>))
 
 import Debug.Trace(trace)
+
+tracew :: [String] -> a -> a
+tracew w v = trace (unwords w) v
 
 type TVar = Var
 type UVar = Int
@@ -67,13 +71,13 @@ lookupV s v = do
     Nothing -> typeError [s] ("Unbound variable "++showPp v) >> newUV s
     Just uv -> do
       p <- ppTy uv
-      trace (unwords["lookup", showPp v, "=", show uv, "=", showPp p]) $
+      tracew ["lookup", showPp v, "=", show uv, "=", showPp p] $
         pure uv
 
 bindV :: HasCallStack => Var -> UVar -> TCM ()
 bindV v uv = do
   p <- ppTy uv
-  trace (unwords["bind", showPp v, "=", show uv, "=", showPp p]) $ do
+  tracew ["bind", showPp v, "=", show uv, "=", showPp p] $ do
     modify (\st -> st { venv_ = M.insert v uv (venv_ st) } )
 
 -- Create rigid var that must be undefined
@@ -159,7 +163,7 @@ adjustLevel a b = do
             la = lvl!a
             lb = lvl!b
             lvl' = if la < lb then writeVec lvl b la else lvl
-        trace (unwords["adjustLevel", show a, show la, show b, show lb]) $ st { lvl_ = lvl' })
+        tracew ["adjustLevel", show a, show la, show b, show lb] $ st { lvl_ = lvl' })
 
 typeError :: [Span] -> String -> TCM ()
 typeError s err = do
@@ -170,6 +174,23 @@ typeError s err = do
 
 uvFunc :: (UVar -> Typ -> TCM a) -> UVar -> TCM a
 uvFunc f = \uv -> uncurry f =<< getU uv
+
+unTy :: UVar -> TCM Exp
+unTy = uvFunc ut where
+  ut uv (UV s _) = pure $ Id s Ident Var ("$uv" <> fromString (show uv))
+  ut uv (RV s "$rv") = pure $ Id s Ident Var ("$rv" <> fromString (show uv))
+  ut _  (RV s i) -- TODO: sus
+    | isVar i = pure $ Id s Ident Var i
+    | otherwise = pure $ Id s Ident Con i
+  ut _ (TTuple s 0) = pure $ Id s Ident Con "()"
+  ut _ (TTuple s 1) = pure $ Id s Ident Con "(_,)"
+  ut _ (TTuple s n) = pure $ Id s Ident Con ("(" <> replicate (n-1) ',' <> ")")
+  ut _ Type = pure $ Id noSpan Ident Con "Type"
+  ut _ (TArrow s a b) = do
+    liftA2 (Arrow s) (unTy a) (unTy b)
+  ut _ (TApp s as) = do
+    App s <$> traverse unTy as
+  ut _ (TScheme _ _ v) = unTy v
 
 ppTy :: UVar -> TCM Doc
 ppTy = ppTy0 False where
@@ -182,7 +203,7 @@ ppTy = ppTy0 False where
   ppTy' _ _ (RV _ v) = pure (pp v)
   ppTy' _ _ (TTuple _ 0) = pure "()"
   ppTy' _ _ (TTuple _ 1) = pure "(_,)"
-  ppTy' _ _ (TTuple _ n) = pure $ parens $ hcat (replicate (n-1) ",")
+  ppTy' _ _ (TTuple _ n) = pure $ parens $ pp (replicate (n-1) ',')
   ppTy' _ _ Type = pure "Type"
   ppTy' f _ (TArrow _ a b) = parenIf f $ do
     a' <- ppTy0 True a
@@ -283,8 +304,8 @@ a === b = do
     r <- (a ==== b)
     let q = if r then "===" else "=/="
     su <- ppTy a
-    trace (unwords [showPp su, "=", show a, "=", show ua, "=", showPp sa, q,
-                    show b, "=", show ub, "=", showPp sb]) pure r
+    tracew [showPp su, "=", show a, "=", show ua, "=", showPp sa, q,
+                    show b, "=", show ub, "=", showPp sb] pure r
   else
     pure True
 
@@ -299,19 +320,27 @@ a ==== b = do
 
 occurs :: Span -> UVar -> UVar -> Typ -> TCM Bool
 occurs s uv uv0 typ = do
-  let occ' :: UVar -> TCM Bool
-      occ' = uvFunc $ const occ
-      occ :: Typ -> TCM Bool
-      occ (UV _ uv') = do
+  let occ' :: Set UVar -> UVar -> TCM (Set UVar, Bool)
+      occ' seen uv'
+        | uv' `S.member` seen = pure (seen, False)
+        | otherwise = uvFunc (const (occ (S.insert uv seen))) uv'
+      occ :: Set UVar -> Typ -> TCM (Set UVar, Bool)
+      occ seen (UV _ uv') = do
         adjustLevel uv uv'
-        pure (uv == uv')
-      occ (RV _ _) = pure False
-      occ (TTuple _ _) = pure False
-      occ Type = pure False
-      occ (TArrow _ a b) = liftA2 (||) (occ' a) (occ' b)
-      occ (TApp _ ts) = and <$> traverse occ' ts
-      occ (TScheme _ _ uv') = occ' uv'
-  r <- occ' uv0
+        pure (seen, uv == uv')
+      occ seen (RV _ _) = pure (seen, False)
+      occ seen (TTuple _ _) = pure (seen, False)
+      occ seen Type = pure (seen, False)
+      occ seen (TArrow _ a b) = orr (`occ'` a) (`occ'` b) seen
+      occ seen (TApp _ ts) =
+        foldr orr (\see -> pure (see, False)) (fmap (flip occ') ts) seen
+      occ seen (TScheme _ _ uv') = occ' seen uv'
+      orr f g seen = do
+        (seenf, fr) <- f seen
+        if fr then
+          pure (seenf, True)
+        else g seenf
+  (_, r) <- occ' mempty uv0
   when r $
     typeError [s, tySpan typ] "Attempt to create a circular type"
   pure r
@@ -543,10 +572,10 @@ tcExpr' (App s [e]) uv typ = do
   typeError [s] "Singleton application"
   tcExpr' e uv typ
 tcExpr' e@(App s es) uv _ = do
-  r <- trace (unwords["tcApp", showPp e, ":", show uv]) $
+  r <- tracew ["tcApp", showPp e, ":", show uv] $
     tcApp tcExpr s es uv
   p <- ppTy r
-  trace (unwords["tcApp'", showPp e, ":", show r, "=", showPp p]) $ pure r
+  tracew ["tcApp'", showPp e, ":", show r, "=", showPp p] $ pure r
 tcExpr' (Fn s (_, b)) uv _ = uncurry (tcFun s uv) (mkRhs b)
 tcExpr' (Asc s e t) uv _ = do
   uvt <- mkTy t
@@ -567,7 +596,7 @@ tcExpr' (Case s e (_, ds)) uv _ = do
   euv <- tcExpr e =<< newUV s
   p <- ppTy euv
   pr <- ppTy uv
-  trace (unwords ["tcMatch", show euv, "=", showPp p, " -> ", show uv, "=", showPp pr]) $
+  tracew ["tcMatch", show euv, "=", showPp p, " -> ", show uv, "=", showPp pr] $
     tcMatch [euv] (fmap toDisj ds) uv
 tcExpr' (If s p t e) uv _ = do
   bool <- rvFor s "Bool"
@@ -718,11 +747,11 @@ tcClause uvs uv (ps, e) = do
 tcFun :: HasCallStack => Span -> UVar -> Arity -> [Clause] -> TCM UVar
 tcFun s uvSig a cs = scope $ do
   p <- ppTy uvSig
-  (as, r) <- trace (unwords ["tcFun", show uvSig, "=", showPp p, " aty ", show a]) $
+  (as, r) <- tracew ["tcFun", show uvSig, "=", showPp p, " aty ", show a] $
              pullSig s a uvSig
   tcMatch as cs r
   p' <- ppTy uvSig
-  trace (unwords ["tcFun'", show uvSig, "=", showPp p', " aty ", show a]) $
+  tracew ["tcFun'", show uvSig, "=", showPp p', " aty ", show a] $
     pure uvSig
 
 pullSig :: HasCallStack => Span -> Arity -> UVar -> TCM ([UVar], UVar)
@@ -754,12 +783,12 @@ tcTBind _ = pure ()
 tcTLHS :: Exp -> TCM ()
 tcTLHS e = do
   let e' = cleanTy e
-      isVar (Id _ _ Var _) = True
-      isVar _ = False
+      isV (Id _ _ Var _) = True
+      isV _ = False
       args (App _ (a:as)) = (a, as)
       args t = (t, [])
   case args e' of
-    (Id s _ Con i, as) | all isVar as -> do
+    (Id s _ Con i, as) | all isV as -> do
       if i=="[]" || i == "Bool" then
         rvFor s i
       else
@@ -796,7 +825,9 @@ tcGroups sigs (D (Struct e ds) : gs) uv = do
   typeError [span e <> span ds] "Struct def TODO"
   tcGroups sigs gs uv
 tcGroups sigs (D (Def (Id s _ Var i) e) : gs) uv = do
-  uve <- gen s $ do
+  let genn | isValue e = gen
+           | otherwise = const id
+  uve <- genn s $ do
     uve0 <- maybe (newUV s) mkTy $ M.lookup i sigs
     tcExpr e uve0
   bindV i uve
@@ -810,7 +841,7 @@ tcGroups sigs (D (BindExp e) : gs) uv = do
   _ <- tcExpr e =<< newUV (span e)
   tcGroups sigs gs uv
 tcGroups sigs (Fns g : gs) uvf = do
-  sigs' <- foldM tcRecGroup sigs ((:[]) <$> g)
+  sigs' <- tcRecGroup sigs g
   tcGroups sigs' gs uvf
 tcGroups sigs (g:gs) uv = do
   typeError [span g] "Unrecognized Def."

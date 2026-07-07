@@ -275,4 +275,4 @@ addCon (s, d) = const (expError s ("addCon: not a constructor def "++showPp d))
 
 evalTop :: HasCallStack => (SpanPos, Defs) -> Value
 evalTop (sp, ds) =
-  runEnv (evDefs ds) (sp, env0)
+  runEnv (evDefs ds) (sp, fmap fst env0)

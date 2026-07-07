@@ -12,8 +12,8 @@ infixl 90 ++
 
 Bool : Type = data { False; True }
 Ordering : Type = data { LT; EQ; GT }
-Integer : Type
-String : Type
+// Int : Type
+// String : Type
 
 (+) : Int -> Int -> Int = intAdd
 (-) : Int -> Int -> Int = intSub
@@ -30,14 +30,14 @@ _ || b = b
 False && _ = False
 _ && b = b
 
-[a] : Type = data { (::) a [a]; []}
+['a] : Type = data { (::) 'a ['a]; []}
 
 one = 0 + 1
 
 fromTo : Int -> Int -> [Int]
 fromTo l u = if l <= u then l :: fromTo (l + one) u else []
 
-(<>) : 'a -> 'a -> 'a
+(<>) : ['a] -> ['a] -> ['a]
 [] <> b = b
 a <> [] = a
 (a::as) <> b = a :: as <> b

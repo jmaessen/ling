@@ -763,12 +763,12 @@ compileTop (sp, ds) = do
       rbrace
     ]
 
-expand :: HasCallStack => Map Var Value -> E ()
+expand :: HasCallStack => Map Var (Value, Exp) -> E ()
 expand e = do
   let es = M.toList e
       collide (En { n_ = N v _ _ }) _ =
         error ("Name collision in initial environment on "++show v)
-      oneBinding (i, v) = do
+      oneBinding (i, (v, _ty)) = do
         n <- withName i
         modify $ bindEnvWith collide i (Var, KnownValue v, n)
   traverse_ oneBinding es

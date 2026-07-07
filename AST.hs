@@ -3,7 +3,7 @@ module AST(
   Span(..), noSpan, Mod(Mod), Imports, Var, Id, Import, Defs, FixDir(..),
   Def(..), OpOrIdent(..), ConOrVar(..), Pat, Exp(..), Constant(..),
   ValidErrs, PP(..), showPp, showsPp, IsAST(..),
-  Arity, DefGroup(..), Clause, GroupFun, groupDefs, patToPats, patsToPat
+  Arity, DefGroup(..), Clause, GroupFun, groupDefs, patToPats, patsToPat, isVar
 ) where
 import Data.ByteString(ByteString)
 import Data.Char(isUpper)
@@ -136,6 +136,7 @@ class PP t => IsAST t where
   allSpans :: t -> [Span]
   fullParen :: t -> t
   noParen :: t -> t
+  isValue :: t -> Bool
   fv :: t -> Set Var
 
 instance PP t => PP (Span, t) where
@@ -147,6 +148,7 @@ instance IsAST t => IsAST (Span, t) where
   allSpans (s, t) = s : allSpans t
   fullParen (s, t) = (s, fullParen t)
   noParen (s, t) = (s, noParen t)
+  isValue (_, t) = isValue t
   fv (_, t) = fv t
 
 instance PP t => PP [t] where
@@ -160,6 +162,7 @@ instance IsAST t => IsAST [t] where
   allSpans = concatMap allSpans
   fullParen ts = fullParen <$> ts
   noParen ts = noParen <$> ts
+  isValue ts = all isValue ts
   fv ts = foldMap fv ts
 
 instance (PP k, PP v) => PP (Map k v) where
@@ -321,6 +324,23 @@ instance IsAST Exp where
   noParen (Assign s l e) = Assign s (noParen l) (noParen e)
   noParen (Block ds) = Block (noParen ds)
   noParen (OpExp s e) = OpExp s (noParen e)
+  isValue (Id _ _ _ _) = True
+  isValue (App _ (f:es)) | all isValue (f:es) = isValueH f where
+    isValueH (Id _ _ Con _) = True
+    isValueH a@(App _ _) = isValue a
+    isValueH (Asc _ e _) = isValueH e
+    isValueH (Paren _ e) = isValueH e
+    isValueH (OpExp _ e) = isValueH e
+    isValueH _ = False
+  isValue (Fn _ _) = True
+  isValue (Asc _ e _) = isValue e
+  isValue (Const _ _) = True
+  isValue (Paren _ e) = isValue e
+  isValue (Tuple _ es) = all isValue es
+  isValue (List _ es) = all isValue es
+  isValue (Block ds) = all isValue ds
+  isValue (OpExp _ e) = isValue e
+  isValue _ = False
   fv (Id _ _ _ v) = S.singleton v
   fv (App _ es) = fv es
   fv (Fn _ ds) = fv ds
@@ -348,11 +368,10 @@ difference as bs = as `S.difference` S.filter isVar bs where
 
 -- Based on the name, is this a variable, rather than a constructor?
 isVar :: Var -> Bool
-isVar "[]" = False -- These are used internally as constructors.
-isVar "()" = False -- (For all tuples in this case)
+isVar "[]" = False -- Used internally as list type constructor and nil.
 isVar v =
   case toString v of
-    (c:_) -> not (isUpper c || c == ':')
+    (c:_) -> not (isUpper c || c == ':' || c == '(')
     _ -> error "Var is the empty string"
 
 isOppy :: Exp -> ValidErrs
@@ -440,6 +459,9 @@ instance IsAST Def where
   noParen (Data pat ds) = Data (noParen pat) (noParen ds)
   noParen (Struct pat ds) = Struct (noParen pat) (noParen ds)
   noParen d@(Fix _ _ _) = d
+  isValue (BindExp e) = isValue e
+  isValue (Def _ e) = isValue e
+  isValue _ = True
   fv (BindExp e) = fv e
   fv (Def pat e) = fv pat <> fv e
   fv (Data _ _) = mempty
@@ -584,6 +606,9 @@ instance IsAST DefGroup where
   noParen (Fns gs) =
     Fns [ (s, v, a, noParen <$> sig, [(noParen as, noParen e) | (as, e) <- ds]) |
           (s,v,a,sig,ds) <- gs ]
+  isValue (D d) = isValue d
+  isValue (Record m) = all isValue (M.elems m)
+  isValue (Fns _) = True
   fv (Fns fs) = S.unions [ fv e `difference` fv ps |
                            (_, _, _, _, rs) <- fs, (ps, e) <- rs ]
   fv g = fvGroup g mempty

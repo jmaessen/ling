@@ -563,9 +563,9 @@ evalTop (sp, ds) =
   in runInner (snd $ runReader (evDefs ds) (sp, Global, env)) (vec, empty, empty)
 
 
-expand :: HasCallStack => Map Var Value -> (Env, BV Value)
+expand :: HasCallStack => Map Var (Value, Exp) -> (Env, BV Value)
 expand e =
-  foldl (\((env, k), vec) (i, v) ->
+  foldl (\((env, k), vec) (i, (v, _ty)) ->
            ((M.insert i (KnownValue v, (Global, k)) env, k+1), vpush vec v))
         ((mempty, 0), empty)
         (M.toList e)
