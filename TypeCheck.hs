@@ -20,8 +20,28 @@ import Text.PrettyPrint hiding ((<>))
 
 import Debug.Trace(trace)
 
-tracew :: [String] -> a -> a
-tracew w v = trace (unwords w) v
+traceBind :: Bool
+traceBind = False
+
+traceUnify :: Bool
+traceUnify = False
+
+traceFunc :: Bool
+traceFunc = False
+
+tracew :: Bool -> [String] -> a -> a
+tracew f w v
+  | f = trace (unwords w) v
+  | otherwise = v
+
+traceb :: [String] -> a -> a
+traceb = tracew traceBind
+
+traceu :: [String] -> a -> a
+traceu = tracew traceUnify
+
+tracef :: [String] -> a -> a
+tracef = tracew traceFunc
 
 type TVar = Var
 type UVar = Int
@@ -70,15 +90,12 @@ lookupV s v = do
   venv <- gets venv_
   case M.lookup v venv of
     Nothing -> typeError [s] ("Unbound variable "++showPp v) >> newUV s
-    Just uv -> do
-      p <- ppTy uv
-      tracew ["lookup", showPp v, "=", show uv, "=", showPp p] $
-        pure uv
+    Just uv -> pure uv
 
 bindV :: HasCallStack => Var -> UVar -> TCM ()
 bindV v uv = do
   p <- ppTy uv
-  tracew ["bind", showPp v, "=", show uv, "=", showPp p] $ do
+  traceb ["bind", showPp v, "=", show uv, "=", showPp p] $
     modify (\st -> st { venv_ = M.insert v uv (venv_ st) } )
 
 -- Create rigid var that must be undefined
@@ -305,7 +322,7 @@ a === b = do
     r <- (a ==== b)
     let q = if r then "===" else "=/="
     su <- ppTy a
-    tracew [showPp su, "=", show a, "=", show ua, "=", showPp sa, q,
+    traceu [showPp su, "=", show a, "=", show ua, "=", showPp sa, q,
                     show b, "=", show ub, "=", showPp sb] pure r
   else
     pure True
@@ -488,7 +505,6 @@ mkList s uv = do
 
 -- Given an Exp representing a type, intern it.
 mkTy :: Exp -> TCM UVar
-mkTy t | trace ("mkTy "++showPp t) False = undefined
 mkTy (Asc _ _ t) = mkTy' t
 mkTy t = mkTy' t
 
@@ -572,11 +588,8 @@ tcExpr' (Id s _ _ i) uv _ =
 tcExpr' (App s [e]) uv typ = do
   typeError [s] "Singleton application"
   tcExpr' e uv typ
-tcExpr' e@(App s es) uv _ = do
-  r <- tracew ["tcApp", showPp e, ":", show uv] $
-    tcApp tcExpr s es uv
-  p <- ppTy r
-  tracew ["tcApp'", showPp e, ":", show r, "=", showPp p] $ pure r
+tcExpr' (App s es) uv _ = do
+  tcApp tcExpr s es uv
 tcExpr' (Fn s (_, b)) uv _ = uncurry (tcFun s uv) (mkRhs b)
 tcExpr' (Asc s e t) uv _ = do
   uvt <- mkTy t
@@ -595,10 +608,7 @@ tcExpr' e@(Ops _ _) uv _ = do
   pure uv
 tcExpr' (Case s e (_, ds)) uv _ = do
   euv <- tcExpr e =<< newUV s
-  p <- ppTy euv
-  pr <- ppTy uv
-  tracew ["tcMatch", show euv, "=", showPp p, " -> ", show uv, "=", showPp pr] $
-    tcMatch [euv] (fmap toDisj ds) uv
+  tcMatch [euv] (fmap toDisj ds) uv
 tcExpr' (If s p t e) uv _ = do
   bool <- rvFor s "Bool"
   tcExpr p bool
@@ -748,11 +758,11 @@ tcClause uvs uv (ps, e) = do
 tcFun :: HasCallStack => Span -> UVar -> Arity -> [Clause] -> TCM UVar
 tcFun s uvSig a cs = scope $ do
   p <- ppTy uvSig
-  (as, r) <- tracew ["tcFun", show uvSig, "=", showPp p, " aty ", show a] $
+  (as, r) <- tracef ["tcFun", show uvSig, "=", showPp p, " aty ", show a] $
              pullSig s a uvSig
   tcMatch as cs r
   p' <- ppTy uvSig
-  tracew ["tcFun'", show uvSig, "=", showPp p', " aty ", show a] $
+  tracef ["tcFun'", show uvSig, "=", showPp p', " aty ", show a] $
     pure uvSig
 
 pullSig :: HasCallStack => Span -> Arity -> UVar -> TCM ([UVar], UVar)
