@@ -2,8 +2,9 @@
 module TypeCheck(typecheckTop) where
 import AST
 import Parse(SpanPos, spanPrefix)
--- import Primitive
+import Primitive(env0)
 import SemUtil(mkRhs, toDisj)
+import Value(Val)
 
 import Control.Monad
 import Control.Monad.State
@@ -163,7 +164,7 @@ adjustLevel a b = do
             la = lvl!a
             lb = lvl!b
             lvl' = if la < lb then writeVec lvl b la else lvl
-        tracew ["adjustLevel", show a, show la, show b, show lb] $ st { lvl_ = lvl' })
+        st { lvl_ = lvl' })
 
 typeError :: [Span] -> String -> TCM ()
 typeError s err = do
@@ -841,11 +842,52 @@ tcGroups sigs (D (BindExp e) : gs) uv = do
   _ <- tcExpr e =<< newUV (span e)
   tcGroups sigs gs uv
 tcGroups sigs (Fns g : gs) uvf = do
-  sigs' <- tcRecGroup sigs g
+  gss <- regroup g
+  sigs' <- foldM tcRecGroup sigs gss
   tcGroups sigs' gs uvf
 tcGroups sigs (g:gs) uv = do
   typeError [span g] "Unrecognized Def."
   tcGroups sigs gs uv
+
+-- We require binding groups to be ordered by dependency,
+-- so rather than running a full SCC we look for forward
+-- edges and group bindings until we run out of forward
+-- edges.
+regroup :: [GroupFun] -> TCM [[GroupFun]]
+regroup g = do
+  let vs = S.fromList [ v | (_, v, _, _, _) <- g ]
+      groupZ = ([], mempty, mempty, False)
+      -- todo: still unresolved groups.
+      -- group: proposed group.
+      -- groupVs: remaining unseen fvs in group.
+      iter :: Set Var -> ([(GroupFun, Set Var)], Set Var, Set Var, Bool) -> [GroupFun] -> TCM [[GroupFun]]
+      iter todo (group, groupBV, groupRFV, groupErr) (f@(_, v, _, _, _) : gs) = do
+        let todo' = S.delete v todo
+            fvs = fv (Fns [f]) `S.intersection` todo'
+            rfvs = fvs `S.difference` groupBV -- remaining fvs to add to group
+            group' = (f, rfvs) : group
+            groupBV' = S.insert v groupBV
+            groupRFV' = S.delete v groupRFV <> rfvs
+            groupErr' = groupErr || not (null fvs)
+        if null groupRFV' then do -- No group dependencies remaining
+          let l = reverse group'
+          when groupErr' $
+            traverse_ unorderedGroup l
+          (reverse (fmap fst l) :) <$> iter (todo `S.difference` groupBV') groupZ gs
+        else -- Add to group
+          iter todo (group', groupBV', groupRFV', groupErr') gs
+      iter _ ([], _, _, _) [] = pure []
+      iter _ (group, _, _, groupErr) [] = do
+        let l = reverse group
+        when groupErr $ traverse_ unorderedGroup l
+        pure [fmap fst l]
+      unorderedGroup ((s, v, _, _, _), fvs) = do
+        if null fvs then
+          typeError [s] ("Later definition of "++showPp v)
+        else
+          typeError [s] (showPp v++" contains non-recursive forward references to "++
+                         showPp (hsep $ punctuate "," $ fmap pp $ S.toList fvs))
+  iter vs groupZ g
 
 tcRecGroup :: Map Var Exp -> [GroupFun] -> TCM (Map Var Exp)
 tcRecGroup sigs g = do
@@ -925,7 +967,8 @@ goTop ds = do
   voidTy <- tupleType noSpan 0
   bool <- brandNewRV "initial bool" noSpan "Bool"
   traverse (\n -> bindV n bool) ["False", "True"]
-  -- TODO: env0 types
+  let prims = (M.toList env0) :: [(Var, (Val Maybe, Exp))]
+  traverse_ (\(i, (_, t)) -> bindV i =<< (gen noSpan $ scope $ mkTy t)) prims
   tcDefs ds voidTy
   pure ds
 

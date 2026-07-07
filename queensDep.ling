@@ -1,4 +1,4 @@
-/* n-queens in ling */
+/* n-queens in ling, with full type inference */
 infixl 30 +
 infixl 30 -
 infix 40 <=
@@ -12,17 +12,11 @@ infixl 90 ++
 
 Bool : Type = data { False; True }
 Ordering : Type = data { LT; EQ; GT }
-// Int : Type
-// String : Type
 
-(+) : Int -> Int -> Int = intAdd
-(-) : Int -> Int -> Int = intSub
-(<=) : Int -> Int -> Bool = intLE
-(==) : Int -> Int -> Bool = intEq
-
-// strConcat : [String] -> String = prim 1 "strConcat"
-// putStr : String -> () = prim 1 "putStr"
-// intToStr : int -> String = prim 1 "intToStr"
+(+) = intAdd
+(-) = intSub
+(<=) = intLE
+(==) = intEq
 
 True || _ = True
 _ || b = b
@@ -34,71 +28,71 @@ _ && b = b
 
 one = 0 + 1
 
-fromTo : Int -> Int -> [Int]
+// fromTo : Int -> Int -> [Int]
 fromTo l u = if l <= u then l :: fromTo (l + one) u else []
 
-(<>) : ['a] -> ['a] -> ['a]
+// (<>) : ['a] -> ['a] -> ['a]
 [] <> b = b
 a <> [] = a
 (a::as) <> b = a :: as <> b
 
-map : ('a -> 'b) -> ['a] -> ['b]
+// map : ('a -> 'b) -> ['a] -> ['b]
 map f ms =
   if (m::ms) = ms then
     f m :: map f ms
   else []
 
-concatMap : ('a -> ['b]) -> ['a] -> ['b]
+// concatMap : ('a -> ['b]) -> ['a] -> ['b]
 concatMap f xs = {
   loop [] = []
   loop (x::xs) = f x <> loop xs
   loop xs
 }
 
-removes : ['a] -> [('a, ['a])]
+// removes : ['a] -> [('a, ['a])]
 removes as = case as {
   [] = []
   (a::as) = (a, as) :: map fn {(b, bs) = (b, a::bs)} (removes as)
 }
 
-isSafe : Int -> Int -> [Int] -> Bool
+// isSafe : Int -> Int -> [Int] -> Bool
 isSafe _ _ [] = True
 isSafe u d (n::ns) =
   if n == u || n == d
   then False
   else isSafe (u + 1) (d - 1) ns
 
-addCol1 : Int -> [Int] -> [[Int]]
+// addCol1 : Int -> [Int] -> [[Int]]
 addCol1 i qs =
   if isSafe (i + 1) (i - 1) qs then [i::qs] else []
 
-addCol : ([Int] -> [[Int]]) -> (Int, [Int]) -> [[Int]]
+// addCol : ([Int] -> [[Int]]) -> (Int, [Int]) -> [[Int]]
 addCol qs (i, vs) = { concatMap (addCol1 i) (qs vs) }
 
-queensFromTo : Int -> [Int] -> [[Int]]
+// queensFromTo : Int -> [Int] -> [[Int]]
 queensFromTo 0 vs = [[]]
 queensFromTo c vs = concatMap (addCol (queensFromTo (c - 1))) (removes vs)
 
-queens : Int -> [[Int]]
+// queens : Int -> [[Int]]
 queens n = queensFromTo n (fromTo 1 n)
 
-showsInt : Int -> [String] -> [String]
+// showsInt : Int -> [String] -> [String]
 showsInt i r = intToStr i :: r
 
-interShow :
-  ('a -> [String] -> [String]) -> String -> String -> ['a] -> [String] -> [String]
+// interShow :
+//   ('a -> [String] -> [String]) -> String -> String -> ['a] -> [String] -> [String]
 interShow sh = fn { pre = fn { sep = fn {
   [] r = r
   (a::as) r = pre :: sh a (interShow sh sep sep as r)
 }}}
 
-shows : [Int] -> [String] -> [String]
+// shows : [Int] -> [String] -> [String]
 shows as r = {
   k = interShow showsInt "" ", " as
   "[" :: k ("]" :: r)
 }
 
-show : [[Int]] -> String
+// show : [[Int]] -> String
 show as =
   strConcat ("[" :: interShow shows "" ",\n " as ["]\n"])
 

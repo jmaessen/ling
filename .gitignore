@@ -5,8 +5,12 @@
 *.dyn_o
 *.p_hi
 *.p_o
+*.dSYM
 ling
 lingrts_gen.c
+queens*.c
+queens
+queensDep
 
 # Cabal / Stack output
 dist/
