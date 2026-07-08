@@ -2,6 +2,7 @@
 module Desugar where
 import AST
 import Parse
+import SemUtil (fromRhs)
 
 import Data.Map as M hiding (foldr)
 import Prelude hiding (span)
@@ -43,23 +44,23 @@ desugarCon' _ (Asc _ e t') = desugarCon' t' e
 desugarCon' _ e = error ("not a constructor def "++showPp e)
 
 desugarGroup :: DefGroup -> [(Span, Def)]
-desugarGroup (D d) = desugarDef (span d, d)
+desugarGroup (D s d) = desugarDef (s, d)
 desugarGroup (Fns fns) = concatMap desugarFunc fns
 desugarGroup (Record m) =
   [ (se, Def (Id se Ident Var i) (desugarExp e)) |
     (i, e) <- M.toAscList m,
     let se = span e ]
 
-desugarFunc :: (Span, Var, Arity, Maybe Exp, [([Exp], Exp)]) -> [(Span, Def)]
+desugarFunc :: GroupFun -> [(Span, Def)]
 desugarFunc (s, f, a, Just sig, ps) =
   (s, BindExp (Asc (span sig) (Id s Ident Var f) sig)) :
     desugarFunc (s, f, a, Nothing, ps)
 desugarFunc (s, f, _, Nothing, ps) =
   [(s, Def (Id s Ident Var f) (Fn s (s, fmap desugarClause ps)))]
 
-desugarClause :: ([Exp], Exp) -> (Span, Def)
-desugarClause (ps, e) =
-  (span ps <> span e, desugarOneFMatch (Def (patsToPat ps) e))
+desugarClause :: Clause -> (Span, Def)
+desugarClause (s, ps, e) =
+  (s, desugarOneFMatch (Def (patsToPat ps) e))
 
 trimSigs :: [(Span, Def)] -> [(Span, Def)]
 trimSigs ((_, BindExp (Asc _ (Id _ _ _ _) _)) : ds@(_:_)) = trimSigs ds

@@ -464,7 +464,7 @@ appWithDesc s d@(Desc nm n _ (CloFun f)) vec nv vs
 
 appDisjs :: HasCallStack => Span -> Var -> [Clause] -> [Known] -> Ef [Value] Value
 appDisjs s f ds knp = do
-  pes <- mapM (\(ps, e) -> withMatch (span ps) (matches ps knp) (eval e)) ds
+  pes <- mapM (\(_, ps, e) -> withMatch (span ps) (matches ps knp) (eval e)) ds
   let kn = foldr1 (<>) (map fst pes)
       ms = map snd pes
   sp <- expSP
@@ -518,18 +518,18 @@ evGroups (Fns fs:ts) = withDiffEnv $ fixEnv (traverse clo fs) (evGroups ts)
 evGroups [Record m] = do
   ms <- locally $ traverse eval m
   pure (Unknown, VStruct <$> sequenceA (snd <$> ms))
-evGroups [D (BindExp e)] = locally $ eval e
-evGroups (D (BindExp e) : ts) = do
+evGroups [D _ (BindExp e)] = locally $ eval e
+evGroups (D _ (BindExp e) : ts) = do
   (_, e') <- locally $ eval e
   (kn, r) <- evGroups ts
   pure (kn, e' >>= \v -> v `seq` r) -- Make sure to demand v in case it's an effect!  Hack!
-evGroups (D (Def p e) : ts) = do
+evGroups (D _ (Def p e) : ts) = do
   (ekn, e') <- locally $ eval e
   (kn, m) <- withMatch (span p) (match p ekn) (evGroups ts)
   pure (kn, do
     v <- e'
     fromMaybeM (error ("Match failure "++showPp p++" = "++showPp v)) (m v))
-evGroups (D (Data _ (_,ds)) : ts) = foldr addCon (evGroups ts) ds
+evGroups (D _ (Data _ (_,ds)) : ts) = foldr addCon (evGroups ts) ds
 evGroups (g : _) = error ("Unexpected group "++showPp g)
 
 vClo :: HasCallStack => Span -> Var -> Arity -> Set Var -> [Clause] -> EV

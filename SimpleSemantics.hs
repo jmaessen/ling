@@ -203,7 +203,7 @@ appWithDesc s d@(Desc nm n _ (CloFun f)) env nv vs
 
 appDisjs :: HasCallStack => Span -> Var -> [Clause] -> [Value] -> E Value
 appDisjs s f [] vs = expError s ("Match failure in "++show f ++ " " ++ showsPp vs)
-appDisjs s f ((ps, e): cs) vs = do
+appDisjs s f ((_, ps, e): cs) vs = do
   mv <- withMatch (matches ps vs) (eval e)
   case mv of
     Nothing -> appDisjs s f cs vs
@@ -240,20 +240,20 @@ evGroups (Fns fs:ts) = fixEnv (traverse clo fs) (evGroups ts)
   where clo (s, v, n, _, cs) = (v,) <$> vClo s v n closeOver cs
         closeOver = fv (Fns fs)
 evGroups [Record m] = VStruct <$> mapM eval m
-evGroups [D (BindExp e)] = eval e
-evGroups (D (BindExp e) : ts) = do
+evGroups [D _ (BindExp e)] = eval e
+evGroups (D _ (BindExp e) : ts) = do
   v <- eval e
   v `seq` evGroups ts -- Make sure to demand v in case it's an effect!  Hack!
-evGroups (D (Def p e) : ts) = do
+evGroups (D _ (Def p e) : ts) = do
   v <- eval e
   m <- withMatch (match p v) (evGroups ts)
   case m of
     Nothing -> expError (span p) ("Match failure "++showPp p++" = "++showPp v)
     Just r -> pure r
-evGroups (D (Data _ (_,ds)) : ts) = foldr addCon (evGroups ts) ds
+evGroups (D _ (Data _ (_,ds)) : ts) = foldr addCon (evGroups ts) ds
 evGroups (g : _) = expError (span g) ("Unexpected group "++showPp g)
 
-vClo :: HasCallStack => Span -> Var -> Arity -> Set Var -> [([Pat], Exp)] -> E Value
+vClo :: HasCallStack => Span -> Var -> Arity -> Set Var -> [Clause] -> E Value
 vClo s f n vs ds = do
   -- The icky thing here is we do the "closed vs" computation for every function
   -- in a binding group separately, even though the resulting env should be the same

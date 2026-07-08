@@ -3,7 +3,7 @@ module TypeCheck(typecheckTop) where
 import AST
 import Parse(SpanPos, spanPrefix)
 import Primitive(env0)
-import SemUtil(mkRhs, toDisj)
+import SemUtil(fromRhs, mkRhs, toDisj, fromDisj)
 import Value(Val)
 
 import Control.Monad
@@ -262,13 +262,13 @@ rinst = uvFunc $ \uv0 ty0 ->
     _ -> pure uv0
 
 -- Instantiate a type scheme with unification vars
-inst :: UVar -> TCM UVar
+inst :: UVar -> TCM (Bool, UVar)
 inst = uvFunc $ \uv ty ->
   case ty of
     TScheme s rts t -> do
       m <- traverse (\uv' -> (uv',) <$> newUV s) rts
-      snd <$> inst' (M.fromList m) t
-    _ -> pure uv
+      (True,) . snd <$> inst' (M.fromList m) t
+    _ -> pure (False, uv)
 
 -- Inner loop: instantiate the type represented by one UVar
 inst' :: Map UVar UVar -> UVar -> TCM (Map UVar UVar, UVar)
@@ -419,19 +419,26 @@ gen s act = do
   minUv <- gets (length . u_)
   uv <- act
   vs <- gen' minUv uv
-  mkScheme s vs uv
+  fst <$> mkScheme s vs (uv, ())
 
-gens :: HasCallStack => [Span] -> TCM [UVar] -> TCM [UVar]
+gen1 :: HasCallStack => Span -> TCM (UVar, a) -> TCM (UVar, a)
+gen1 s act = do
+  minUv <- gets (length . u_)
+  (uv, e) <- act
+  vs <- gen' minUv uv
+  mkScheme s vs (uv, e)
+
+gens :: HasCallStack => [Span] -> TCM [(UVar, a)] -> TCM [(UVar, a)]
 gens spans act = do
   minUv <- gets (length . u_)
-  uvs <- act
-  vss <- traverse (gen' minUv) uvs
-  sequence $ zipWith3 mkScheme spans vss uvs
+  uves <- act
+  vss <- traverse (gen' minUv . fst) uves
+  (sequence $ zipWith3 mkScheme spans vss uves)
 
-mkScheme :: Span -> Set UVar -> UVar -> TCM UVar
-mkScheme s vs uv
-  | null vs = pure uv
-  | otherwise = newUV' (TScheme s (S.toList vs) uv)
+mkScheme :: Span -> Set UVar -> (UVar, a) -> TCM (UVar, a)
+mkScheme s vs (uv, a)
+  | null vs = pure (uv, a)
+  | otherwise = (,a) <$> newUV' (TScheme s (S.toList vs) uv)
 
 gen' :: HasCallStack => UVar -> UVar -> TCM (Set UVar)
 gen' minUv uv0 = uvFunc g uv0 where
@@ -485,22 +492,22 @@ expectList s uv (TApp _ [l0, e]) = do
     mkList s uv
 expectList s uv _ = mkList s uv
 
--- Expect an arrow type, return the type and its operand and result.
-expectArrow :: HasCallStack => Span -> UVar -> Typ -> TCM (UVar, UVar, UVar)
-expectArrow _ uv (TArrow _ a b) = pure (uv, a, b)
+-- Expect an arrow type, return its operand and result.
+expectArrow :: HasCallStack => Span -> UVar -> Typ -> TCM (UVar, UVar)
+expectArrow _ _ (TArrow _ a b) = pure (a, b)
 expectArrow s uv _ = do
   a <- newUV s
   b <- newUV s
   r <- newUV' (TArrow s a b)
-  r' <- tcFin s " more arguments than expected " r uv
-  return (r', a, b)
+  _ <- tcFin id s " more arguments than expected " r uv
+  return (a, b)
 
 mkList :: Span -> UVar -> TCM (UVar, UVar)
 mkList s uv = do
   l <- getRV s "[]"
   e <- newUV s
   uv' <- newUV' (TApp s [l, e])
-  ruv <- tcFin s " got list " uv' uv
+  ruv <- tcFin id s " got list " uv' uv
   pure (ruv, e)
 
 -- Given an Exp representing a type, intern it.
@@ -518,8 +525,7 @@ mkTy' (Arrow s a b) = do
   a' <- mkTy' a
   b' <- mkTy' b
   newUV' (TArrow s a' b')
-mkTy' (Wild s) = do
-  newUV s
+mkTy' (Wild s) = newUV s -- _ just means "Any old type here".
 mkTy' (Paren _ e) = mkTy' e
 mkTy' (Tuple s []) = tupleType s 0
 mkTy' (Tuple s es) = do
@@ -574,224 +580,239 @@ constTypeName (EChar _) = "Char"
 constTypeName (EString _) = "String"
 
 -- Type check an expr
-type TC = Exp -> UVar -> TCM UVar
+type TC = Exp -> UVar -> TCM (UVar, Exp)
+
+asc :: Exp -> UVar -> Exp
+asc e uv = Asc s e (Const s (EInt (toInteger uv)))
+  where s = span e
+
+asc' :: Bool -> Exp -> UVar -> Exp
+asc' True e uv = asc e uv
+asc' _ e _ = e
 
 tcExpr :: HasCallStack => TC
 tcExpr e = uvFunc (tcExpr' e)
 
-tcExpr' :: HasCallStack => Exp -> UVar -> Typ -> TCM UVar
+tcExpr' :: HasCallStack => Exp -> UVar -> Typ -> TCM (UVar, Exp)
 tcExpr' e uv (TScheme _ _ _) = do
   uv' <- rinst uv
   tcExpr e uv'
-tcExpr' (Id s _ _ i) uv _ =
-  tcId s "identifier doesn't match expected type " i uv
+tcExpr' e@(Id _ _ _ _) uv _ =
+  tcId "identifier doesn't match expected type " e uv
 tcExpr' (App s [e]) uv typ = do
   typeError [s] "Singleton application"
   tcExpr' e uv typ
 tcExpr' (App s es) uv _ = do
   tcApp tcExpr s es uv
-tcExpr' (Fn s (_, b)) uv _ = uncurry (tcFun s uv) (mkRhs b)
+tcExpr' (Fn s (s', b)) uv _ =
+  fmap (Fn s . (s',) . fromRhs) <$> uncurry (tcFun s uv) (mkRhs b)
 tcExpr' (Asc s e t) uv _ = do
   uvt <- mkTy t
-  uvt' <- tcFin s "Signature doesn't match expected type " uvt uv
+  uvt' <- tcFin id s "Signature doesn't match expected type " uvt uv
   tcExpr e uvt'
-tcExpr' (Arrow s _ _) uv _ = do
+tcExpr' e@(Arrow s _ _) uv _ = do
   typeError [s] "Unexpected arrow expression"
-  pure uv
-tcExpr' (Wild s) uv _ = do
+  pure (uv, e)
+tcExpr' e@(Wild s) uv _ = do
   typeError [s] "Wildcard in expression"
-  pure uv
-tcExpr' (Const s c) uv _ =
-  tcFin s " expected " uv =<< getRV s (constTypeName c)
+  pure (uv, e)
+tcExpr' e@(Const s c) uv _ =
+  tcFin (,e) s " expected " uv =<< getRV s (constTypeName c)
 tcExpr' e@(Ops _ _) uv _ = do
   typeError [span e] "Unresolved infix ops"
-  pure uv
-tcExpr' (Case s e (_, ds)) uv _ = do
-  euv <- tcExpr e =<< newUV s
-  tcMatch [euv] (fmap toDisj ds) uv
+  pure (uv, e)
+tcExpr' (Case s e (s', ds)) uv _ = do
+  (euv, e') <- tcExpr e =<< newUV s
+  (uv', cs) <- tcMatch [euv] (fmap toDisj ds) uv
+  pure (uv', Case s e' (s', fmap fromDisj cs))
 tcExpr' (If s p t e) uv _ = do
   bool <- rvFor s "Bool"
-  tcExpr p bool
-  tcExpr t uv
-  tcExpr e uv
-  pure uv
+  (_, p') <- tcExpr p bool
+  (_, t') <- tcExpr t uv
+  (_, e') <- tcExpr e uv
+  pure (uv, If s p' t' e')
 tcExpr' (IfMatch s p d t e) uv _ = do
-  uvp <- tcExpr d =<< newUV s
+  (uvp, d') <- tcExpr d =<< newUV s
   scope $ do
-    tcPat p uvp
-    tcExpr t uv
-    tcExpr e uv
-    pure uv
-tcExpr' (Dot s _) uv _ = do
+    (_, p') <- tcPat p uvp
+    (_, t') <- tcExpr t uv
+    (_, e') <- tcExpr e uv
+    pure (uv, IfMatch s p' d' t' e')
+tcExpr' e@(Dot s _) uv _ = do
   typeError [s] "Dot typing is TODO"
-  pure uv
-tcExpr' (Paren _ e) uv ty = tcExpr' e uv ty
+  pure (uv, e)
+tcExpr' (Paren s e) uv ty =
+  fmap (Paren s) <$> tcExpr' e uv ty
 tcExpr' (Tuple s es) uv ty = tcTuple tcExpr s es uv ty
 tcExpr' (List s es) uv ty = tcList tcExpr s es uv ty
 tcExpr' (Do s p e ds) uv _ = do
-  tp <- tcExpr e =<< newUV s
+  (tp, e') <- tcExpr e =<< newUV s
   scope $ do
-    _ <- tcPat p tp
-    tcDefs ds uv
-tcExpr' (Assign s _ _) uv _ = do
+    (_, p') <- tcPat p tp
+    fmap (Do s p' e') <$> tcDefs ds uv
+tcExpr' (Assign s l r) uv _ = do
+  (_, l') <- tcExpr l =<< newUV s
+  (_, r') <- tcExpr r =<< newUV s
   typeError [s] " assign typechecking TODO"
-  pure uv
-tcExpr' (Block bs) uv _ = tcDefs bs uv
-tcExpr' (OpExp _ e) uv ty = tcExpr' e uv ty
+  pure (uv, Assign s l' r')
+tcExpr' (Block bs) uv _ = fmap Block <$> tcDefs bs uv
+tcExpr' (OpExp s e) uv ty = fmap (OpExp s) <$> tcExpr' e uv ty
 
-tcFin :: HasCallStack => Span -> String -> UVar -> UVar -> TCM UVar
-tcFin s msg got want = do
+tcFin :: HasCallStack => (UVar -> a) -> Span -> String -> UVar -> UVar -> TCM a
+tcFin f s msg got want = do
   ok <- got === want
   unless ok $ do
     pg <- ppTy got
     pw <- ppTy want
     typeError [s] (msg <> showPp pg <> " vs " <> showPp pw)
-  pure got
+  pure (f got)
 
 -- tcPat also binds variables
 tcPat :: TC
 tcPat e = uvFunc (tcPat' e)
 
-tcPat' :: Exp -> UVar -> Typ -> TCM UVar
-tcPat' (Id s _ Con i) uv _ =
-  tcId s "Constructor doesn't match expected type " i uv
-tcPat' (Id _ _ Var i) uv _ = do
+tcPat' :: Pat -> UVar -> Typ -> TCM (UVar, Pat)
+tcPat' e@(Id _ _ Con _) uv _ =
+  tcId "Constructor doesn't match expected type " e uv
+tcPat' e@(Id _ _ Var i) uv _ = do
   -- TODO: we should check shadowing since we don't check it
   -- in isValid.
   bindV i uv
-  pure uv
+  pure (uv, asc e uv)
 tcPat' (App s [a]) uv ty = do
   typeError [s] "Singleton app in pattern"
   tcPat' a uv ty
 tcPat' (App s as) uv _ = tcApp tcPat s as uv
 tcPat' (Asc s e t) uv _ = do
   uvt <- mkTy t
-  uvt' <- tcFin s "Pat signature doesn't match expected type " uvt uv
+  uvt' <- tcFin id s "Pat signature doesn't match expected type " uvt uv
   tcPat e uvt'
-tcPat' (Arrow s _ _) uv _ = do
+tcPat' e@(Arrow s _ _) uv _ = do
   typeError [s] "Unexpected arrow pattern"
-  pure uv
-tcPat' (Wild _) uv _ = pure uv
+  pure (uv, e)
+tcPat' e@(Wild _) uv _ = pure (uv, e)
 tcPat' e@(Const _ _) uv ty = tcExpr' e uv ty
 tcPat' (Paren _ e) uv ty = tcPat' e uv ty
 tcPat' (Tuple s e) uv ty = tcTuple tcPat s e uv ty
 tcPat' (List s e) uv ty = tcList tcPat s e uv ty
-tcPat' (OpExp _ e) uv ty = tcPat' e uv ty
-tcPat' (Block (s, _ds)) uv _ = do
+tcPat' (OpExp s e) uv ty =
+  fmap (OpExp s) <$> tcPat' e uv ty
+tcPat' e@(Block (s, _ds)) uv _ = do
   typeError [s] "Record pat TODO"
-  pure uv
-tcPat' (Dot s _) uv _ = do
+  pure (uv, e)
+tcPat' e@(Dot s _) uv _ = do
   typeError [s] "Dot in pat TODO"
-  pure uv
+  pure (uv, e)
 tcPat' e@(Ops _ _) uv ty = tcExpr' e uv ty -- Fails
-tcPat' (Fn s _) uv _ =
-  typeError [s] "Fn in pat" >> pure uv
-tcPat' (Case s _ _) uv _ =
-  typeError [s] "Case in pat" >> pure uv
-tcPat' (If s _ _ _) uv _ =
-  typeError [s] "If in pat" >> pure uv
-tcPat' (IfMatch s _ _ _ _) uv _ =
-  typeError [s] "If <- in pat" >> pure uv
-tcPat' (Do s _ _ _) uv _ =
-  typeError [s] "Do in pat" >> pure uv
-tcPat' (Assign s _ _) uv _ =
-  typeError [s] "Assign in pat" >> pure uv
+tcPat' e@(Fn s _) uv _ =
+  typeError [s] "Fn in pat" >> pure (uv, e)
+tcPat' e@(Case s _ _) uv _ =
+  typeError [s] "Case in pat" >> pure (uv, e)
+tcPat' e@(If s _ _ _) uv _ =
+  typeError [s] "If in pat" >> pure (uv, e)
+tcPat' e@(IfMatch s _ _ _ _) uv _ =
+  typeError [s] "If <- in pat" >> pure (uv, e)
+tcPat' e@(Do s _ _ _) uv _ =
+  typeError [s] "Do in pat" >> pure (uv, e)
+tcPat' e@(Assign s _ _) uv _ =
+  typeError [s] "Assign in pat" >> pure (uv, e)
 
 -- Type check an id (same for both Con pat and any exp id)
-tcId :: Span -> String -> Var -> UVar -> TCM UVar
-tcId s msg i uv = do
+tcId :: String -> Exp -> UVar -> TCM (UVar, Exp)
+tcId msg e@(Id s _ cv i) uv = do
   uvi <- lookupV s i
-  t <- inst uvi
-  tcFin s msg t uv
+  (ins, t) <- inst uvi
+  tcFin (\uv' -> (uv', asc' (ins && Var == cv) e uv')) s msg t uv
+tcId _ e _ = error ("Bad tcId " <> showPp e)
 
 -- Type check an application (same for both pat and exp)
-tcApp :: HasCallStack => TC -> Span -> [Exp] -> UVar -> TCM UVar
+tcApp :: HasCallStack => TC -> Span -> [Exp] -> UVar -> TCM (UVar, Exp)
 tcApp _  s [] uv = do
   typeError [s] "Empty application"
-  pure uv
+  pure (uv, App s [])
 tcApp tc s (f : es) uv = do
-  tf <- tc f =<< newUV s
-  tcArgs tc s es uv =<< getU tf
+  (tf, f') <- tc f =<< newUV s
+  fmap (App s . (f':)) <$> (tcArgs tc s es uv =<< getU tf)
 
 -- Typecheck the args of a function call of type uv returning uvr.
-tcArgs :: HasCallStack => TC -> Span -> [Exp] -> UVar -> (UVar, Typ) -> TCM UVar
+tcArgs :: HasCallStack => TC -> Span -> [Exp] -> UVar -> (UVar, Typ) -> TCM (UVar, [Exp])
 tcArgs _ s [] uvr (uv, _) =
-  tcFin s "Result type mismatch, got " uvr uv
+  tcFin (,[]) s "Result type mismatch, got " uvr uv
 tcArgs tc s (e:es) uvr (uv, typ) = do
-  (_, a, b) <- expectArrow s uv typ
-  _ <- tc e a
-  tcArgs tc s es uvr =<< getU b
+  (a, b) <- expectArrow s uv typ
+  (_, e') <- tc e a
+  fmap (e':) <$> (tcArgs tc s es uvr =<< getU b)
 
-tcTuple :: TC -> Span -> [Exp] -> UVar -> Typ -> TCM UVar
+tcTuple :: TC -> Span -> [Exp] -> UVar -> Typ -> TCM (UVar, Exp)
 tcTuple _ s [] uv ty = do
   t <- expectTuple s 0 uv ty
-  pure t
+  pure (t, Tuple s [])
 tcTuple tc s es uv (TApp _ (tt:ts)) | length es == length ts = do
   _ <- uncurry (expectTuple s (length es)) =<< getU tt
-  zipWithM_ tc es ts
-  pure uv
+  es' <- fmap snd <$> zipWithM tc es ts
+  pure (uv, Tuple s es')
 tcTuple tc s es uv _ = do
   let len = length es
   tt <- tupleType s len
   ts <- replicateM len (newUV s)
   t <- newUV' (TApp s (tt:ts))
-  tcFin s " is tuple of type " t uv
-  zipWithM tc es ts
-  pure t
+  tcFin id s " is tuple of type " t uv
+  es' <- fmap snd <$> zipWithM tc es ts
+  pure (t, Tuple s es')
 
-tcList :: TC -> Span -> [Exp] -> UVar -> Typ -> TCM UVar
+tcList :: TC -> Span -> [Exp] -> UVar -> Typ -> TCM (UVar, Exp)
 tcList tc s es uv ty = do
   (ruv, e) <- expectList s uv ty
-  traverse (`tc` e) es
-  pure ruv
+  es' <- fmap snd <$> traverse (`tc` e) es
+  pure (ruv, List s es')
 
-tcMatch :: [UVar] -> [Clause] -> UVar -> TCM UVar
+tcMatch :: [UVar] -> [Clause] -> UVar -> TCM (UVar, [Clause])
 tcMatch uvs cs uv = do
-  traverse_ (tcClause uvs uv) cs
-  pure uv
+  cs' <- fmap snd <$> traverse (tcClause uvs uv) cs
+  pure (uv, cs')
 
-tcClause :: [UVar] -> UVar -> Clause -> TCM UVar
-tcClause uvs uv (ps, e) = do
-  zipWithM_ tcPat ps uvs
-  tcExpr e uv
+tcClause :: [UVar] -> UVar -> Clause -> TCM (UVar, Clause)
+tcClause uvs uv (s, ps, e) = do
+  ps' <- fmap snd <$> zipWithM tcPat ps uvs
+  fmap (s, ps',) <$> tcExpr e uv
 
-tcFun :: HasCallStack => Span -> UVar -> Arity -> [Clause] -> TCM UVar
+tcFun :: HasCallStack => Span -> UVar -> Arity -> [Clause] -> TCM (UVar, [Clause])
 tcFun s uvSig a cs = scope $ do
   p <- ppTy uvSig
   (as, r) <- tracef ["tcFun", show uvSig, "=", showPp p, " aty ", show a] $
              pullSig s a uvSig
-  tcMatch as cs r
+  (_, cs') <- tcMatch as cs r
   p' <- ppTy uvSig
   tracef ["tcFun'", show uvSig, "=", showPp p', " aty ", show a] $
-    pure uvSig
+    pure (uvSig, cs')
 
 pullSig :: HasCallStack => Span -> Arity -> UVar -> TCM ([UVar], UVar)
 pullSig _ 0 uvs = pure ([], uvs)
 pullSig s arity uvs = do
-  (_, a, b) <- uncurry (expectArrow s) =<< getU uvs
+  (a, b) <- uncurry (expectArrow s) =<< getU uvs
   (as, r) <- pullSig s (arity - 1) b
   pure (a:as, r)
 
-tcDefs :: HasCallStack => Defs -> UVar -> TCM UVar
+tcDefs :: HasCallStack => Defs -> UVar -> TCM (UVar, Defs)
 tcDefs ds uv =
   case groupDefs ds of
     Right gs -> do
       traverse_ tcTBind gs
-      tcGroups mempty gs uv
+      fmap (fst ds,) <$> tcGroups mempty gs uv
     Left es -> do
       traverse_ (\(s, bs) -> typeError [s] (toString bs)) es
-      newUV (span ds)
+      (,ds) <$> newUV (span ds)
 
 -- Create initial bindings for type names, so that
 -- we can handle mutual type recursion.
 tcTBind :: DefGroup -> TCM ()
-tcTBind (D (Data e _)) = tcTLHS e
-tcTBind (D (Struct e _)) = tcTLHS e
+tcTBind (D _ (Data e _)) = tcTLHS e
+tcTBind (D _ (Struct e _)) = tcTLHS e
 tcTBind _ = pure ()
 -- TODO: type synonyms.
 
 -- Bind LHS of data or struct def (common code).
-tcTLHS :: Exp -> TCM ()
+tcTLHS :: Pat -> TCM ()
 tcTLHS e = do
   let e' = cleanTy e
       isV (Id _ _ Var _) = True
@@ -810,51 +831,56 @@ tcTLHS e = do
     _ -> do
       typeError [span e] "Type decl must start with type name."
 
-tcGroups :: HasCallStack => Map Var Exp -> [DefGroup] -> UVar -> TCM UVar
-tcGroups _ [] uv = typeError [] "Expected final expr in block" >> pure uv
+tcGroups :: HasCallStack => Map Var Exp -> [DefGroup] -> UVar -> TCM (UVar, [(Span, Def)])
+tcGroups _ [] uv =
+  typeError [] "Expected final expr in block" >> pure (uv, [])
 tcGroups sigs [Record m] _ = do
   mapM_ (\(i, sig) ->
            typeError [span sig] ("signature without definition for "++toString i))
     (M.toList sigs)
   let s = foldMap' span (M.elems m)
   typeError [s] "Record binding TODO"
-  newUV s
-tcGroups sigs [D (BindExp e)] uv = do
+  uv <- newUV s
+  pure (uv, [ (s', Def (Id s' Ident Var i) e) | (i, e) <- M.toList m, let s' = span e ])
+tcGroups sigs [D s (BindExp e)] uv = do
   mapM_ (\(i, sig) ->
            typeError [span sig] ("signature without definition for "++toString i))
     (M.toList sigs)
-  tcExpr e uv
-tcGroups sigs (D (Fix _ _ _) : ds) uv = do
+  (uv', e') <- tcExpr e uv
+  pure (uv', [(s, BindExp e')])
+tcGroups sigs (D _ (Fix _ _ _) : ds) uv = do
   tcGroups sigs ds uv
-tcGroups sigs (D (BindExp a@(Asc _ (Id _ _ Var i) _)) : ds) uv =
+tcGroups sigs (D _ (BindExp a@(Asc _ (Id _ _ Var i) _)) : ds) uv =
   tcGroups (M.insert i a sigs) ds uv
-tcGroups sigs (D (Data e ds) : gs) uv = do
+tcGroups sigs (D s (Data e (s', ds)) : gs) uv = do
   -- TODO kind checking!  That's just recursion, right?  Right?
-  traverse_ (bindCon (cleanTy e)) (snd ds)
-  tcGroups sigs gs uv
-tcGroups sigs (D (Struct e ds) : gs) uv = do
+  dss <- traverse (bindCon (cleanTy e)) ds
+  fmap ((s, Data e (s', concat dss)):) <$> tcGroups sigs gs uv
+tcGroups sigs (D s (Struct e ds) : gs) uv = do
   typeError [span e <> span ds] "Struct def TODO"
-  tcGroups sigs gs uv
-tcGroups sigs (D (Def (Id s _ Var i) e) : gs) uv = do
-  let genn | isValue e = gen
+  fmap ((s, Struct e ds):) <$> tcGroups sigs gs uv
+tcGroups sigs (D s (Def v@(Id _ _ Var i) e) : gs) uv = do
+  let genn | isValue e = gen1
            | otherwise = const id
-  uve <- genn s $ do
+  (uve, e') <- genn s $ do
     uve0 <- maybe (newUV s) mkTy $ M.lookup i sigs
     tcExpr e uve0
   bindV i uve
-  tcGroups (M.delete i sigs) gs uv
-tcGroups sigs (D d@(Def p e) : gs) uv = do
+  (uv', ds) <- tcGroups (M.delete i sigs) gs uv
+  pure (uv', (s, Def (asc v uve) e') : ds)
+tcGroups sigs (D s d@(Def p e) : gs) uv = do
   -- TODO: Can we have sigs for vars bound by p?
-  uve <- tcExpr e =<< newUV (span d)
-  _ <- tcPat p uve
-  tcGroups sigs gs uv
-tcGroups sigs (D (BindExp e) : gs) uv = do
-  _ <- tcExpr e =<< newUV (span e)
-  tcGroups sigs gs uv
+  (uve, e') <- tcExpr e =<< newUV (span d)
+  (_, p') <- tcPat p uve
+  fmap ((s, Def p' e'):) <$> tcGroups sigs gs uv
+tcGroups sigs (D s (BindExp e) : gs) uv = do
+  (_, e') <- tcExpr e =<< newUV (span e)
+  fmap ((s, BindExp e'):) <$> tcGroups sigs gs uv
 tcGroups sigs (Fns g : gs) uvf = do
   gss <- regroup g
-  sigs' <- foldM tcRecGroup sigs gss
-  tcGroups sigs' gs uvf
+  (sigs', dss) <- foldM tcRecGroup (sigs, []) gss
+  (uv, ds) <- tcGroups sigs' gs uvf
+  pure (uv, concat (reverse dss) <> ds)
 tcGroups sigs (g:gs) uv = do
   typeError [span g] "Unrecognized Def."
   tcGroups sigs gs uv
@@ -899,41 +925,52 @@ regroup g = do
                          showPp (hsep $ punctuate "," $ fmap pp $ S.toList fvs))
   iter vs groupZ g
 
-tcRecGroup :: Map Var Exp -> [GroupFun] -> TCM (Map Var Exp)
-tcRecGroup sigs g = do
+tcRecGroup :: (Map Var Exp, [[(Span, Def)]]) -> [GroupFun] -> TCM (Map Var Exp, [[(Span, Def)]])
+tcRecGroup (sigs, dss) g = do
   let vars = [ v | (_, v, _, _, _) <- g ]
       spans = [ s | (s, _, _, _, _) <- g ]
+      sigs' = foldr M.delete sigs vars
       bindSigs (s, v, a, sig, ds) = do
         uvSig <- scope $ do
           uvp <- bindSigM s v (M.lookup v sigs)
           uvs <- bindSigM s v sig
-          tcFin s "Multiple signatures don't match " uvp uvs
+          tcFin id s "Multiple signatures don't match " uvp uvs
         bindV v uvSig
         pure (s, a, uvSig, ds)
       checkFunc (s, a, uvSig, cs) = scope $ do
         uvr <- rinst uvSig
         tcFun s uvr a cs
-  uvs <- gens spans $ do
+      mkFunc (s, v, _, _, _) (uv, cs) = do
+        let f = Fn s (s, fromRhs cs)
+        (s, Def (asc (Id s Ident Var v) uv) f)
+  uvcs <- gens spans $ do
     g' <- traverse bindSigs g
     traverse checkFunc g'
-  zipWithM_ bindV vars uvs
-  return (foldr M.delete sigs vars)
+  zipWithM_ bindV vars (fmap fst uvcs)
+  let ds = zipWith mkFunc g uvcs
+  pure (sigs', ds : dss)
 
-bindCon :: Exp -> (Span, Def) -> TCM ()
+bindCon :: Exp -> (Span, Def) -> TCM [(Span, Def)]
 bindCon hdr (s, BindExp e) = bindCon' hdr s (cleanCon e)
-bindCon _   (s, _) = typeError [s] "Not a constructor def"
+bindCon _   (s, _) = typeError [s] "Not a constructor def" >> pure []
 
-bindCon' :: Exp -> Span -> Exp -> TCM ()
-bindCon' hdr _ (Asc s (Id _ _ Con c) ty) =
-  bindV c =<< scope (gen s (validateConTy hdr ty >> mkTy ty))
-bindCon' hdr s (Id _ _ Con c) =
-  bindV c =<< scope (gen s (mkTy hdr))
-bindCon' hdr s (App s' (Id _ _ Con c : as)) =
-  bindV c =<< scope (gen s (mkArrowTy s' as hdr))
-bindCon' hdr s (List _ []) =
-  bindV "[]" =<< scope (gen s (mkTy hdr))
+bindCon' :: Exp -> Span -> Exp -> TCM [(Span, Def)]
+bindCon' hdr _ (Asc s v@(Id _ _ Con c) ty) = do
+  bindConF s v c (validateConTy hdr ty >> mkTy ty)
+bindCon' hdr s v@(Id _ _ Con c) = do
+  bindConF s v c (mkTy hdr)
+bindCon' hdr s (App s' (v@(Id _ _ Con c) : as)) = do
+  bindConF s v c (mkArrowTy s' as hdr)
+bindCon' hdr s v@(List _ []) =
+  bindConF s v "[]" (mkTy hdr)
 bindCon' _ s _ =
-  typeError [s] "Not a constructor def"
+  typeError [s] "Not a constructor def" >> pure []
+
+bindConF :: Span -> Exp -> Var -> TCM UVar -> TCM [(Span, Def)]
+bindConF s v c mkSig = do
+  uv <- scope $ gen s mkSig
+  bindV c uv
+  pure $ [(s, BindExp (asc v uv))]
 
 validateConTy :: Exp -> Exp -> TCM ()
 validateConTy r (Arrow _ _a b) = validateConTy r b
@@ -960,8 +997,7 @@ mkArrowTy s (t:ts) r = do
 bindSig :: Var -> Exp -> TCM UVar
 bindSig i (Asc _ (Id _ _ _ i') t) | i == i' = bindSig i t
 bindSig _ t = do
-  uv <- gen (span t) $ mkTy t
-  pure uv
+  gen (span t) (mkTy t)
 
 -- Bind possible signature for var, return the type bound or fresh UV.
 bindSigM :: Span -> Var -> Maybe Exp -> TCM UVar
@@ -979,8 +1015,8 @@ goTop ds = do
   traverse (\n -> bindV n bool) ["False", "True"]
   let prims = (M.toList env0) :: [(Var, (Val Maybe, Exp))]
   traverse_ (\(i, (_, t)) -> bindV i =<< (gen noSpan $ scope $ mkTy t)) prims
-  tcDefs ds voidTy
-  pure ds
+  (_, ds') <- tcDefs ds voidTy
+  pure ds'
 
 typecheckTop :: HasCallStack => (SpanPos, Defs) -> (SpanPos, Defs)
 typecheckTop (sp, ds) = do

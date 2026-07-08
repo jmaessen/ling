@@ -558,16 +558,16 @@ isDisjunct (s, _) = [(s, "Not a valid case disjunct")]
 
 type Arity = Int
 
-type Clause = ([Pat], Exp)
+type Clause = (Span, [Pat], Exp)
 type GroupFun = (Span, Var, Arity, Maybe Exp, [Clause])
 data DefGroup
-  = D Def
+  = D Span Def
   | Fns [GroupFun]
   | Record (Map Var Exp)
   deriving (Eq, Show)
 
 instance PP DefGroup where
-  pp (D d) = pp d
+  pp (D _ d) = pp d
   pp (Record m) = pp [(Def (Id noSpan Ident Var f) e) | (f, e) <- M.toList m]
   pp (Fns m) = PP.vcat $ concat [
     ["-- Group:"],
@@ -575,42 +575,43 @@ instance PP DefGroup where
       (s, nm, _, sig, pes) <- m,
       let i = Id s Ident Var nm,
       d <- maybe id (\t -> (BindExp (Asc (span t) i t):)) sig $
-           [ Def (App s (i:ps)) e | (ps, e) <- pes ]],
+           [ Def (App s (i:ps)) e | (_, ps, e) <- pes ]],
     ["-- End group"]]
 
 instance IsAST DefGroup where
-  isValid (D d) = isValid d
+  isValid (D _ d) = isValid d
   isValid (Record m) = concatMap isValid (M.elems m)
   isValid (Fns gs) =
     [ err |
       (_, _, _, sig, ds) <- gs,
-      (as, e) <- ds,
+      (_, as, e) <- ds,
       err <- maybe [] isTy sig <> concatMap isPat as <> isValid e ]
-  span (D d) = span d
+  span (D s _) = s
   span (Record m) = foldl1 (<>) (span <$> M.elems m)
   span (Fns gs) = foldl1 (<>) [ s | (s, _, _, _, _) <- gs]
-  allSpans (D d) = allSpans d
+  allSpans (D s d) = s : allSpans d
   allSpans (Record m) = concatMap allSpans $ M.elems m
   allSpans (Fns gs) =
     [ s | (s0, _, _, sig, ds) <- gs,
           s <- s0 : maybe [] allSpans sig <>
-               [ s1 | (as, e) <- ds, s1 <- allSpans as <> allSpans e]]
-  fullParen (D d) = D (fullParen d)
+               [ s1 | (sd, as, e) <- ds, s1 <- sd : allSpans as <> allSpans e]]
+  fullParen (D s d) = D s (fullParen d)
   fullParen (Record m) = Record (fullParen <$> m)
   fullParen (Fns gs) =
     Fns [ (s, v, a, fullParen <$> sig,
-           [(fullParen as, fullParen e) | (as, e) <- ds]) |
+           [(sd, fullParen as, fullParen e) | (sd, as, e) <- ds]) |
           (s,v,a,sig,ds) <- gs ]
-  noParen (D d) = D (noParen d)
+  noParen (D s d) = D s (noParen d)
   noParen (Record m) = Record (noParen <$> m)
   noParen (Fns gs) =
-    Fns [ (s, v, a, noParen <$> sig, [(noParen as, noParen e) | (as, e) <- ds]) |
+    Fns [ (s, v, a, noParen <$> sig,
+           [(sd, noParen as, noParen e) | (sd, as, e) <- ds]) |
           (s,v,a,sig,ds) <- gs ]
-  isValue (D d) = isValue d
+  isValue (D _ d) = isValue d
   isValue (Record m) = all isValue (M.elems m)
   isValue (Fns _) = True
   fv (Fns fs) = S.unions [ fv e `difference` fv ps |
-                           (_, _, _, _, rs) <- fs, (ps, e) <- rs ]
+                           (_, _, _, _, rs) <- fs, (_, ps, e) <- rs ]
   fv g = fvGroup g mempty
 
 fvDefs :: Defs -> Set Var
@@ -621,11 +622,14 @@ fvDefs ds =
 
 fvGroup :: DefGroup -> Set Var -> Set Var
 fvGroup (Record r) later = later <> fv (M.elems r)
-fvGroup (D (BindExp (Asc _ (Id _ _ _ i) _))) later = later `difference` S.singleton i
-fvGroup (D (BindExp (Paren _ e))) later = fvGroup (D (BindExp e)) later
-fvGroup (D (BindExp (Asc s (Paren _ e) t))) later = fvGroup (D (BindExp (Asc s e t))) later
-fvGroup (D (Def pat e)) later = fv e <> (later `difference` fv pat)
-fvGroup (D d) later = later <> fv d
+fvGroup (D _ (BindExp (Asc _ (Id _ _ _ i) _))) later =
+  later `difference` S.singleton i
+fvGroup (D s (BindExp (Paren _ e))) later =
+  fvGroup (D s (BindExp e)) later
+fvGroup (D s (BindExp (Asc s' (Paren _ e) t))) later =
+  fvGroup (D s (BindExp (Asc s' e t))) later
+fvGroup (D _ (Def pat e)) later = fv e <> (later `difference` fv pat)
+fvGroup (D _ d) later = later <> fv d
 fvGroup (Fns fs) later = (later <> rhs) `difference` vs
   where vs = S.fromList [ v | (_, v, _, _, _) <- fs ]
         rhs = fv (Fns fs)
@@ -656,12 +660,12 @@ groupDef (s, Def (App _ (Id _ _ Var f : ps)) e)
     else if n /= length ps then
       Left [(s, ("Arity mismatch in definition of " <> f))]
     else
-      Right (Fns ((s <> s', ff, n, Nothing, (ps, e):pes) : fns) : ts)
+      Right (Fns ((s <> s', ff, n, Nothing, (s, ps, e):pes) : fns) : ts)
   | otherwise =
-    Right (Fns ((s, f, length ps, Nothing, [(ps, e)]) : c : fns) : ts)
+    Right (Fns ((s, f, length ps, Nothing, [(s, ps, e)]) : c : fns) : ts)
 -- New fndef binding group
 groupDef (s, Def (App _ (Id _ _ Var f : ps)) e) (Right ts) =
-  Right (Fns [(s, f, length ps, Nothing, [(ps, e)])] : ts)
+  Right (Fns [(s, f, length ps, Nothing, [(s, ps, e)])] : ts)
 -- Ascription in binding group
 groupDef (s, BindExp (Asc _ (Id _ _ Var f) t))
          (Right (Fns ((s', ff, n, sig, pes): fns) : ts))
@@ -671,8 +675,6 @@ groupDef (s, BindExp (Asc _ (Id _ _ Var f) t))
         Left [(s, ("Doubled signature for " <> f)), (span sg, "Second signature")]
       Nothing ->
         Right (Fns ((s', ff, n, Just t, pes): fns) : ts)
-groupDef (_, a@(BindExp (Asc _ (Id _ _ Var _) _))) (Right (Fns m : bs)) =
-  Right (Fns m : D a : bs)
 groupDef (s, Def i@(Id _ _ _ _) (Paren _ e)) ts = groupDef (s, Def i e) ts
 groupDef (s, Def (Id _ _ Var f) (Fn _ ds)) (Right (Fns m : bs)) =
   Right (Fns (fnToGroup s f ds : m) : bs)
@@ -683,18 +685,18 @@ groupDef (s, BindExp (Asc s' (Paren _ e) t)) ts =
 groupDef (_, Def (Id _ _ Var var) e) (Right []) = Right [Record (M.singleton var e)]
 groupDef (_, Def (Id _ _ Var var) e) (Right [Record m]) = Right [Record (M.insert var e m)]
 groupDef (s, d) (Right (Record _ : _)) = Left [(s, fromString (show (pp d)) <> " is not a struct binding")]
-groupDef (_, d@(BindExp _)) (Right ts) = Right ((D d):ts)
+groupDef (s, d@(BindExp _)) (Right ts) = Right ((D s d):ts)
 groupDef (s, Def (Asc _ p _) e) ts = groupDef (s, Def p e) ts
-groupDef (_, d) (Right ts) = Right (D d : ts)
+groupDef (s, d) (Right ts) = Right (D s d : ts)
 groupDef _ (Left e) = Left e
 
 fnToGroup :: Span -> Var -> Defs -> (Span, Var, Arity, Maybe Exp, [Clause])
 fnToGroup s f (_, ds) = (s, f, aty cs, Nothing, cs) where
-  cs :: [Clause] = map (defToClause . snd) ds
+  cs :: [Clause] = map defToClause ds
   aty [] = error "Empty clauses"
-  aty ((ps,_):_) = length ps
-  defToClause (Def p e) = (patToPats p, e)
-  defToClause d = error ("Bad clause " <> showPp d)
+  aty ((_, ps, _):_) = length ps
+  defToClause (sd, Def p e) = (sd, patToPats p, e)
+  defToClause (_, d) = error ("Bad clause " <> showPp d)
 
 -- Turn a singleton pattern from case to a clausal list of patterns
 patToPats :: Pat -> [Pat]

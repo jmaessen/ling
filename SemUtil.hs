@@ -1,7 +1,7 @@
 module SemUtil(
   conDesc, conClo,
   patToPats, patsToPat, typeArity,
-  toDisj, mkRhs) where
+  toDisj, fromDisj, fromRhs, mkRhs) where
 import AST
 import Data.ByteString.UTF8(toString)
 import GHC.Stack(HasCallStack)
@@ -28,17 +28,25 @@ typeArity _ = 0
 -- Turn a case disjunct (lhs is a singleton pat) into
 -- a clause (lhs is a list of pats).
 toDisj :: HasCallStack => (Span, Def) -> Clause
-toDisj (_, Def p e) = ([p], e)
+toDisj (s, Def p e) = (s, [p], e)
 toDisj (_, d) = error ("Illegal case disjunct "++showPp d)
+
+fromDisj :: Clause -> (Span, Def)
+fromDisj (s, [p], e) = (s, Def p e)
+fromDisj (s, ps, e) = error ("Non-singleton case disjunct "++showPp (Def (App s ps) e))
+
+fromRhs :: [Clause] -> [(Span, Def)]
+fromRhs cs = fmap (\(s, ps, e) -> (s, Def (App s ps) e)) cs
 
 -- Turn a list of Fn arg bindings into an arity-tagged list of clauses.
 mkRhs :: HasCallStack => [(Span, Def)] -> (Arity, [Clause])
 mkRhs ds = do
-  let one (_, Def p e) = (patToPats p, e)
+  let one (s, Def p e) = (s, patToPats p, e)
       one (_, d) = error ("Unexpected disjunct "++showPp d)
+      snd3 (_, b, _) = b
   case fmap one ds of
     [] -> error "Empty anonymous function."
     c:cs
-      | all ((==a) . length . fst) cs -> (a, c:cs)
+      | all ((==a) . length . snd3) cs -> (a, c:cs)
       | otherwise -> error ("Inconsistent arities, expect "++show a++"\n"++showPp ds)
-      where a = length . fst $ c
+      where a = length . snd3 $ c

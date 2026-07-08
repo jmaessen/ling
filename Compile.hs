@@ -391,7 +391,8 @@ bestPatVar r1@(k1, _) r2@(k2, _)
 
 clauseVars :: [Clause] -> [Var]
 clauseVars [] = error "Empty clause"
-clauseVars cs = snd <$> foldr1 (zipWith bestPatVar) (fmap (fmap patVar . fst) cs)
+clauseVars cs = snd <$> foldr1 (zipWith bestPatVar) (fmap (fmap patVar . snd3) cs)
+  where snd3 (_, v, _) = v
 
 -- cont helpers.
 -- This one assumes that e yields an Exp directly and handles other conts.
@@ -527,7 +528,7 @@ appDisjs :: HasCallStack => Span -> [Clause] -> [(Known, Name)] -> EV
 appDisjs s ds kns Exp = contBind "case_val" (appDisjs s ds kns) Exp
 appDisjs s ds kns k = do
   lsucc <- newLabel
-  let clause ((ps, e):cs) (m, kn, act) = do
+  let clause ((_, ps, e):cs) (m, kn, act) = do
         (modec, knc, actc) <- withMatch (matches ps) (eval e k) lsucc kns
         case modec of
           AlwaysSucceeds -> pure (AlwaysSucceeds, kn <> knc, act >> actc)
@@ -603,20 +604,20 @@ evGroups [Record m] k = do
   ms <- locally $ traverse (\e -> eval e Exp) m
   pure (Unknown, cont k $
     ms `seq` error "TODO evGroups record")
-evGroups [D (BindExp e)] k =
+evGroups [D _ (BindExp e)] k =
   locally $ eval e k
-evGroups (D (Data _ (_,ds)) : ts) k =
+evGroups (D _ (Data _ (_,ds)) : ts) k =
   foldr addCon (evGroups ts k) ds
 evGroups ts Exp =
   contBind "block_val" (evGroups ts) Exp
 evGroups (Fns fs:ts) k =
   withDiffEnv $ fixEnv (evFns fs) (evGroups ts k)
-evGroups (D (BindExp e) : ts) k = do
+evGroups (D _ (BindExp e) : ts) k = do
   (_, e') <- locally $ eval e Exp
   (kn, r) <- evGroups ts k
   pure (kn, e' >> r)
-evGroups (D (Def p e) : ts) k = do
-  sloc <- spanPrefix (span p) <$> expSP
+evGroups (D s (Def p e) : ts) k = do
+  sloc <- spanPrefix s <$> expSP
   let v = snd $ patVar p
       matchErr = cMatchError sloc
   n <- withName v
