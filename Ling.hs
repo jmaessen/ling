@@ -53,11 +53,16 @@ doit what fs =
       doit Pp fs
       let vs = validate <$> fs
           ds = desugar <$> vs
+      putStrLn "DESUGARED"
       mapM_ (print . pp . fullParen . snd) ds
+      putStrLn "SIMPLE"
       mapM_ (print . pp . Simple.evalTop) ds
+      putStrLn "GO"
       mapM_ (print . pp . evalTop) ds
+      putStrLn "COMPILE"
       mapM_ (print . Compile.compileTop) ds
-      mapM_ (print . pp . snd . typecheckTop) vs
+      putStrLn "TC"
+      mapM_ (print . pp . fullParen . snd . typecheckTop) vs
     GenTuple -> GenTuple.gen
 
 main :: HasCallStack => IO ()

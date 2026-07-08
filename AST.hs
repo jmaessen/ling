@@ -3,16 +3,19 @@ module AST(
   Span(..), noSpan, Mod(Mod), Imports, Var, Id, Import, Defs, FixDir(..),
   Def(..), OpOrIdent(..), ConOrVar(..), Pat, Exp(..), Constant(..),
   ValidErrs, PP(..), showPp, showsPp, IsAST(..),
-  Arity, DefGroup(..), Clause, GroupFun, groupDefs, patToPats, patsToPat, isVar
+  Arity, DefGroup(..), Clause, GroupFun,
+  groupDefs, patToPats, patsToPat, isVar,
+  allSpans, fullParen, noParen
 ) where
 import Data.ByteString(ByteString)
+import Data.ByteString.UTF8(toString, fromString)
 import Data.Char(isUpper)
 import Data.Set hiding (null, map, foldr, difference)
 import qualified Data.Set as S
 import Data.Map as M hiding (null, map, foldr, difference)
-import Data.ByteString.UTF8(toString, fromString)
+import Data.Monoid(Endo(..))
 import GHC.Stack(HasCallStack)
-import Prelude hiding (span)
+import Prelude hiding (span, exp)
 import Text.Megaparsec(SourcePos)
 import qualified Text.PrettyPrint as PP
 import Text.PrettyPrint(
@@ -109,12 +112,6 @@ unpar :: Exp -> Exp
 unpar (Paren _ e) = e
 unpar e = e
 
-fp :: IsAST t => t -> t
-fp = fullParen
-
-fpe :: Exp -> Exp
-fpe = unpar . fp
-
 class PP t where
   pp :: t -> Doc
 
@@ -133,10 +130,9 @@ showsPp as = show (fsep (pp <$> as))
 class PP t => IsAST t where
   isValid :: t -> ValidErrs
   span :: t -> Span
-  allSpans :: t -> [Span]
-  fullParen :: t -> t
-  noParen :: t -> t
   isValue :: t -> Bool
+  bottomUp :: (Exp -> Exp) -> (Def -> Def) -> t -> t
+  gather :: (Monoid m) => (Exp -> m -> m) -> (Def -> m -> m) -> t -> m
   fv :: t -> Set Var
 
 instance PP t => PP (Span, t) where
@@ -145,10 +141,9 @@ instance PP t => PP (Span, t) where
 instance IsAST t => IsAST (Span, t) where
   isValid (_, t) = isValid t
   span (s, _) = s
-  allSpans (s, t) = s : allSpans t
-  fullParen (s, t) = (s, fullParen t)
-  noParen (s, t) = (s, noParen t)
   isValue (_, t) = isValue t
+  bottomUp ef df (s, t) = (s, bottomUp ef df t)
+  gather ef df (_, t) = gather ef df t
   fv (_, t) = fv t
 
 instance PP t => PP [t] where
@@ -156,13 +151,12 @@ instance PP t => PP [t] where
 
 instance IsAST t => IsAST [t] where
   isValid ts = concatMap isValid ts
-  span [] = error "span []"
+  span [] = noSpan
   span [a] = span a
   span (a:as) = span a <> span as
-  allSpans = concatMap allSpans
-  fullParen ts = fullParen <$> ts
-  noParen ts = noParen <$> ts
   isValue ts = all isValue ts
+  bottomUp ef df as = bottomUp ef df <$> as
+  gather ef df as = foldMap (gather ef df) as
   fv ts = foldMap fv ts
 
 instance (PP k, PP v) => PP (Map k v) where
@@ -180,8 +174,42 @@ ppDef :: Doc -> Doc -> Exp -> Doc
 ppDef lhs eq (Block ds) = ppBlock (lhs <+> eq) ds
 ppDef lhs eq e = hang (lhs <+> eq) 2 (pp e)
 
-allSpans2 :: (IsAST a, IsAST b) => a -> b -> [Span]
-allSpans2 a b = allSpans a <> allSpans b
+allSpans :: IsAST a => a -> [Span]
+allSpans a = appEndo (gather ase asd a) [] where
+  ase (Fn s (s',ds)) m = Endo ((s : s' : map fst ds)<>) <> m
+  ase (Case s _ (s', bs)) m = Endo ((s : s' : map fst bs)<>) <> m
+  ase (Do s _ _ (s', bs)) m  =  Endo ((s : s' : map fst bs)<>) <> m
+  ase (Block (s, ds)) m = Endo ((s : map fst ds)<>) <> m
+  ase e m = Endo (span e:) <> m
+  asd (Fix _ _ (s, _)) m = Endo (s:) <> m
+  asd _ m = m
+
+fullParen :: IsAST a => a -> a
+fullParen = bottomUp exp def where
+  exp e@(Id _ _ _ _) = e
+  exp e@(Wild _) = e
+  exp e@(Const _ _) = e
+  exp e@(Block _) = e
+  exp (OpExp s e) = OpExp s $ unpar e
+  exp e@(Dot _ _) = e
+  exp (Paren s e) = Paren s $ unpar e
+  exp (Ops e ops) =
+    par (Ops e ((\(op, e2) -> (unpar op, e2)) <$> ops))
+  exp (If s i t e) =
+    par (If s (unpar i) (unpar t) (unpar e))
+  exp (IfMatch s p i t e) =
+    par (IfMatch s (unpar p) (unpar i) (unpar t) (unpar e))
+  exp (Tuple s es) = Tuple s (unpar <$> es)
+  exp (List s es) = List s (unpar <$> es)
+  exp e = par e
+  def (BindExp e) = BindExp (unpar e)
+  def (Def pat e) = Def (unpar pat) (unpar e)
+  def (Data pat ds) = Data (unpar pat) ds
+  def (Struct pat ds) = Struct (unpar pat) ds
+  def d@(Fix _ _ _) = d
+
+noParen :: IsAST a => a -> a
+noParen = bottomUp unpar id
 
 instance PP Constant where
   pp (EInt i) = integer i
@@ -262,68 +290,6 @@ instance IsAST Exp where
   span (Assign s _ _) = s
   span (Block ds) = span ds
   span (OpExp s _) = s
-  allSpans (Id s _ _ _) = [s]
-  allSpans (App s es) = s : allSpans es
-  allSpans (Fn s ds) = s : allSpans ds
-  allSpans (Asc s t e) = s : allSpans2 t e
-  allSpans (Arrow s a b) = s : allSpans2 a b
-  allSpans (Wild s) = [s]
-  allSpans (Const s _) = [s]
-  allSpans (Ops e []) = allSpans e
-  allSpans (Ops e os) = allSpans e <> concatMap (\(a,b) -> allSpans a <> allSpans b) os
-  allSpans (Case s e bs) = s : allSpans2 e bs
-  allSpans (If s c t e) = s : allSpans [c, t, e]
-  allSpans (IfMatch s p c t e) = s : allSpans [p, c, t, e]
-  allSpans (Dot s es) = s : allSpans es
-  allSpans (Paren s e) = s : allSpans e
-  allSpans (Tuple s es) = s : allSpans es
-  allSpans (List s es) = s : allSpans es
-  allSpans (Do s p e bs) = s : allSpans2 p e <> allSpans bs
-  allSpans (Assign s p e) = s : allSpans2 p e
-  allSpans (Block ds) = allSpans ds
-  allSpans (OpExp s e) = s : allSpans e
-  fullParen e@(Id _ _ _ _) = e
-  fullParen (App s es) = par (App s (fmap fp es))
-  fullParen (Fn s body) = par (Fn s (fp body))
-  fullParen (Asc s e t) = par (Asc s (fp e) (fp t))
-  fullParen (Arrow s a b) = par (Arrow s (fp a) (fp b))
-  fullParen e@(Wild _) = e
-  fullParen e@(Const _ _) = e
-  fullParen (Ops e ops) =
-    par (Ops (fp e) ((\(op, e2) -> (fpe op, fp e2)) <$> ops))
-  fullParen (Case s e ds) = par (Case s (fp e) (fp ds))
-  fullParen (If s i t e) =
-    par (If s (fpe i) (fpe t) (fpe e))
-  fullParen (IfMatch s p i t e) =
-    par (IfMatch s (fp p) (fp i) (fpe t) (fpe e))
-  fullParen (Dot s es) = Dot s (map fp es)
-  fullParen (Paren s e) = Paren s (fpe e)
-  fullParen (Tuple s es) = Tuple s (fpe <$> es)
-  fullParen (List s es) = List s (fpe <$> es)
-  fullParen (Do s p e ds) = par (Do s (fp p) (fp e) (fp ds))
-  fullParen (Assign s l e) = par (Assign s (fp l) (fp e))
-  fullParen (Block ds) = Block (fp ds)
-  fullParen (OpExp s e) = OpExp s (fpe e)
-  noParen e@(Id _ _ _ _) = e
-  noParen (App s es) = App s (noParen es)
-  noParen (Fn s ds) = Fn s (noParen ds)
-  noParen (Asc s e t) = Asc s (noParen e) (noParen t)
-  noParen (Arrow s a b) = Arrow s (noParen a) (noParen b)
-  noParen e@(Wild _) = e
-  noParen e@(Const _ _) = e
-  noParen (Ops e ops) =
-    Ops (noParen e) ((\(op, e2) -> (noParen op, noParen e2)) <$> ops)
-  noParen (Case s e ds) = Case s (noParen e) (noParen ds)
-  noParen (If s i t e) = If s (noParen i) (noParen t) (noParen e)
-  noParen (IfMatch s p i t e) = IfMatch s (noParen p) (noParen i) (noParen t) (noParen e)
-  noParen (Dot s es) = Dot s (map noParen es)
-  noParen (Paren _ e) = noParen e
-  noParen (Tuple s es) = Tuple s (noParen <$> es)
-  noParen (List s es) = List s (noParen <$> es)
-  noParen (Do s p e ds) = Do s (noParen p) (noParen e) (noParen ds)
-  noParen (Assign s l e) = Assign s (noParen l) (noParen e)
-  noParen (Block ds) = Block (noParen ds)
-  noParen (OpExp s e) = OpExp s (noParen e)
   isValue (Id _ _ _ _) = True
   isValue (App _ (f:es)) | all isValue (f:es) = isValueH f where
     isValueH (Id _ _ Con _) = True
@@ -341,6 +307,50 @@ instance IsAST Exp where
   isValue (Block ds) = all isValue ds
   isValue (OpExp _ e) = isValue e
   isValue _ = False
+  bottomUp ef df e0 = b e0 where
+    d ds = bottomUp ef df ds
+    b e@(Id _ _ _ _) = ef e
+    b (App s es) = ef $ App s (b <$> es)
+    b (Fn s ds) = ef $ Fn s (d ds)
+    b (Asc s e t) = ef $ Asc s (b e) (b t)
+    b (Arrow s a b') = ef $ Arrow s (b a) (b b')
+    b e@(Wild _) = ef e
+    b e@(Const _ _) = ef e
+    b (Ops e ops) =
+      ef $ Ops (b e) ((\(op, e2) -> (b op, b e2)) <$> ops)
+    b (Case s e ds) = ef $ Case s (b e) (d ds)
+    b (If s i t e) = ef $ If s (b i) (b t) (b e)
+    b (IfMatch s p i t e) = ef $ IfMatch s (b p) (b i) (b t) (b e)
+    b (Dot s es) = ef $ Dot s (map b es)
+    b (Paren s e) = ef $ Paren s (b e)
+    b (Tuple s es) = ef $ Tuple s (b <$> es)
+    b (List s es) = ef $ List s (b <$> es)
+    b (Do s p e ds) = ef $ Do s (b p) (b e) (d ds)
+    b (Assign s l e) = ef $ Assign s (b l) (b e)
+    b (Block ds) = ef $ Block (d ds)
+    b (OpExp s e) = ef $ OpExp s (b e)
+  gather ef df e0 = b e0 where
+    d def = gather ef df def
+    b e@(Id _ _ _ _) = ef e mempty
+    b e@(App _ es) = ef e (foldMap b es)
+    b e@(Fn _ ds) = ef e (d ds)
+    b e@(Asc _ e' t) = ef e (b e' <> b t)
+    b e@(Arrow _ a b') = ef e (b a <> b b')
+    b e@(Wild _) = ef e mempty
+    b e@(Const _ _) = ef e mempty
+    b e@(Ops e' ops) =
+      ef e (b e' <> foldMap (\(op, e2) -> b op <> b e2) ops)
+    b e@(Case _ e' ds) = ef e (b e' <> d ds)
+    b e@(If _ i t e') = ef e (b i <> b t <> b e')
+    b e@(IfMatch _ p i t e') = ef e (b p <> b i <> b t <> b e')
+    b e@(Dot _ es) = ef e (foldMap b es)
+    b e@(Paren _ e') = ef e (b e')
+    b e@(Tuple _ es) = ef e (foldMap b es)
+    b e@(List _ es) = ef e (foldMap b es)
+    b e@(Do _ p e' ds) = ef e (b p <> b e' <> d ds)
+    b e@(Assign _ l e') = ef e (b l <> b e')
+    b e@(Block ds) = ef e (d ds)
+    b e@(OpExp _ e') = ef e (b e')
   fv (Id _ _ _ v) = S.singleton v
   fv (App _ es) = fv es
   fv (Fn _ ds) = fv ds
@@ -444,24 +454,24 @@ instance IsAST Def where
   span (Data pat ds) = span pat <> span ds
   span (Struct pat ds) = span pat <> span ds
   span (Fix _ _ (s, _)) = s
-  allSpans (BindExp e) = allSpans e
-  allSpans (Def p e) = allSpans2 p e
-  allSpans (Data p ds) = allSpans2 p ds
-  allSpans (Struct p ds) = allSpans2 p ds
-  allSpans (Fix _ _ (s, _)) = [s]
-  fullParen (BindExp e) = BindExp (fpe e)
-  fullParen (Def pat e) = Def (fpe pat) (fpe e)
-  fullParen (Data pat ds) = Data (fpe pat) (fp ds)
-  fullParen (Struct pat ds) = Struct (fpe pat) (fp ds)
-  fullParen d@(Fix _ _ _) = d
-  noParen (BindExp e) = BindExp (noParen e)
-  noParen (Def pat e) = Def (noParen pat) (noParen e)
-  noParen (Data pat ds) = Data (noParen pat) (noParen ds)
-  noParen (Struct pat ds) = Struct (noParen pat) (noParen ds)
-  noParen d@(Fix _ _ _) = d
   isValue (BindExp e) = isValue e
   isValue (Def _ e) = isValue e
   isValue _ = True
+  bottomUp ef df def = d def where
+    b = bottomUp ef df
+    d (BindExp e) = df $ BindExp (b e)
+    d (Def pat e) = df $ Def (b pat) (b e)
+    d (Data pat ds) = df $ Data (b pat) (bottomUp ef df ds)
+    d (Struct pat ds) = df $ Struct (b pat) (bottomUp ef df ds)
+    d d'@(Fix _ _ _) = df d'
+  gather ef df def = d def where
+    b = gather ef df
+    bds = gather ef df
+    d d'@(BindExp e) = df d' (b e)
+    d d'@(Def pat e) = df d' (b pat <> b e)
+    d d'@(Data pat ds) = df d' (b pat <> bds ds)
+    d d'@(Struct pat ds) = df d' (b pat <> bds ds)
+    d d'@(Fix _ _ _) = df d' mempty
   fv (BindExp e) = fv e
   fv (Def pat e) = fv pat <> fv e
   fv (Data _ _) = mempty
@@ -589,27 +599,30 @@ instance IsAST DefGroup where
   span (D s _) = s
   span (Record m) = foldl1 (<>) (span <$> M.elems m)
   span (Fns gs) = foldl1 (<>) [ s | (s, _, _, _, _) <- gs]
-  allSpans (D s d) = s : allSpans d
-  allSpans (Record m) = concatMap allSpans $ M.elems m
-  allSpans (Fns gs) =
-    [ s | (s0, _, _, sig, ds) <- gs,
-          s <- s0 : maybe [] allSpans sig <>
-               [ s1 | (sd, as, e) <- ds, s1 <- sd : allSpans as <> allSpans e]]
-  fullParen (D s d) = D s (fullParen d)
-  fullParen (Record m) = Record (fullParen <$> m)
-  fullParen (Fns gs) =
-    Fns [ (s, v, a, fullParen <$> sig,
-           [(sd, fullParen as, fullParen e) | (sd, as, e) <- ds]) |
-          (s,v,a,sig,ds) <- gs ]
-  noParen (D s d) = D s (noParen d)
-  noParen (Record m) = Record (noParen <$> m)
-  noParen (Fns gs) =
-    Fns [ (s, v, a, noParen <$> sig,
-           [(sd, noParen as, noParen e) | (sd, as, e) <- ds]) |
-          (s,v,a,sig,ds) <- gs ]
   isValue (D _ d) = isValue d
   isValue (Record m) = all isValue (M.elems m)
   isValue (Fns _) = True
+  bottomUp ef df g = b g where
+    eb = bottomUp ef df
+    db = bottomUp ef df
+    b (D s d) = D s (db d)
+    b (Record m) = Record $ fmap eb m
+    b (Fns m) =
+      Fns [(s, v, a, eb <$> me,
+            [(s', eb <$> ps, eb e) | (s', ps, e) <- ds]) |
+           (s, v, a, me, ds) <- m]
+  gather ef df g = b g where
+    db = gather ef df
+    b (D _ d) = db d
+    b (Record m) =
+      foldMap db [ Def (Id (span e) Ident Var i) e |
+                   (i, e) <- M.toList m ]
+    b (Fns m) =
+      foldMap db [ d |
+                   (s, v, _, me, ds) <- m,
+                   d <- maybe id ((:) . BindExp) me
+                        [ Def (App s (Id s' Ident Var v : ps)) e |
+                          (s', ps, e) <- ds ] ]
   fv (Fns fs) = S.unions [ fv e `difference` fv ps |
                            (_, _, _, _, rs) <- fs, (_, ps, e) <- rs ]
   fv g = fvGroup g mempty

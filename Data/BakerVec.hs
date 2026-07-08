@@ -459,7 +459,8 @@ instance Foldable Vec where
   null v = length v == 0
 
 instance Functor Vec where
-  fmap f = withList (fromList . fmap f)
+  fmap f v = withList (fromListN (length v) . fmap f) v
 
 instance Traversable Vec where
-  traverse f = withList (fmap fromList . traverse f)
+  traverse f v =
+    withList (fmap (fromListN (length v)) . traverse f) v

@@ -2,7 +2,6 @@
 module Desugar where
 import AST
 import Parse
-import SemUtil (fromRhs)
 
 import Data.Map as M hiding (foldr)
 import Prelude hiding (span)
