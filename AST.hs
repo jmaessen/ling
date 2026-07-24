@@ -35,6 +35,9 @@ data Span = S Int Int
 instance Eq Span where
   _ == _ = True
 
+instance Ord Span where
+  compare _ _ = EQ
+
 instance Semigroup Span where
   S 0 0 <> b = b
   a <> S 0 0 = a
@@ -190,8 +193,9 @@ fullParen = bottomUp exp def where
   exp e@(Wild _) = e
   exp e@(Const _ _) = e
   exp e@(Block _) = e
-  exp (OpExp s e) = OpExp s $ unpar e
   exp e@(Dot _ _) = e
+  exp (Arrow s a b) = par $ Arrow s a $ unpar b
+  exp (OpExp s e) = par $ OpExp s $ unpar e
   exp (Paren s e) = Paren s $ unpar e
   exp (Ops e ops) =
     par (Ops e ((\(op, e2) -> (unpar op, e2)) <$> ops))

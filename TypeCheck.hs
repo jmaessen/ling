@@ -8,15 +8,20 @@ import Value(Val)
 
 import Control.Monad
 import Control.Monad.State
-import Data.BakerVec as BV hiding (replicate)
+import Data.BakerVec hiding (replicate)
+import qualified Data.BakerVec as BV
 import Data.ByteString.Char8(replicate)
 import Data.ByteString.UTF8(fromString, toString)
 import Data.Foldable
-import Data.Map as M hiding ((!), null, foldl, foldr)
-import Data.Set as S hiding (null, foldl, foldr, fold)
+import Data.List(sortOn, transpose)
+import Data.Ord(Down(..))
+import Data.Map hiding ((!), null, filter, foldl, foldr, splitAt)
+import qualified Data.Map as M
+import Data.Set as S hiding (null, foldl, filter, foldr, fold, splitAt)
+import qualified GHC.Exts as IL
 import GHC.Stack(HasCallStack)
 import Prelude hiding (span, replicate)
-import Text.PrettyPrint hiding ((<>))
+import Text.PrettyPrint as PP hiding ((<>))
 
 import Debug.Trace(trace)
 
@@ -54,7 +59,7 @@ data Typ
   | TArrow Span UVar UVar
   | TApp Span [UVar]
   | TScheme Span [UVar] UVar
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 tySpan :: Typ -> Span
 tySpan (UV s _) = s
@@ -192,23 +197,6 @@ typeError s err = do
 
 uvFunc :: (UVar -> Typ -> TCM a) -> UVar -> TCM a
 uvFunc f = \uv -> uncurry f =<< getU uv
-
-unTy :: UVar -> TCM Exp
-unTy = uvFunc ut where
-  ut uv (UV s _) = pure $ Id s Ident Var ("$uv" <> fromString (show uv))
-  ut uv (RV s "$rv") = pure $ Id s Ident Var ("$rv" <> fromString (show uv))
-  ut _  (RV s i) -- TODO: sus
-    | isVar i = pure $ Id s Ident Var i
-    | otherwise = pure $ Id s Ident Con i
-  ut _ (TTuple s 0) = pure $ Id s Ident Con "()"
-  ut _ (TTuple s 1) = pure $ Id s Ident Con "(_,)"
-  ut _ (TTuple s n) = pure $ Id s Ident Con ("(" <> replicate (n-1) ',' <> ")")
-  ut _ Type = pure $ Id noSpan Ident Con "Type"
-  ut _ (TArrow s a b) = do
-    liftA2 (Arrow s) (unTy a) (unTy b)
-  ut _ (TApp s as) = do
-    App s <$> traverse unTy as
-  ut _ (TScheme _ _ v) = unTy v
 
 ppTy :: UVar -> TCM Doc
 ppTy = ppTy0 False where
@@ -408,6 +396,174 @@ unifyApp sa as _ [b] = do
 unifyApp sa (a:as) sb (b:bs) =
   liftA2 (&&) (a ==== b) (unifyApp sa as sb bs)
 
+
+------------------------------------------------------------
+-- Hash consing of types prior to anti-unification
+-- This enables easy checking of type equality.
+
+-- Hash cons the set of types, returning a mapping
+-- from original types to new types and the new types.
+hashCons :: Vec Typ -> (Vec UVar, Vec Typ)
+hashCons u = do
+  let l = length u
+      toNew0 = BV.replicate l (-1)
+      (toNew, new, _) =
+        foldl (\s i -> fst $ hc u i s) (toNew0, mempty, mempty) [0..l-1]
+  (toNew, new)
+
+type HCState = (Vec UVar, Vec Typ, Map Typ UVar)
+
+hc :: Vec Typ -> UVar -> HCState -> (HCState, UVar)
+hc old uv s@(toNew, new, mapping)
+  | nuv == (-1) = hc' old uv (old!uv) (toNew, new, mapping)
+  | otherwise = (s, nuv)
+  where nuv = toNew!uv
+
+hc' :: Vec Typ -> UVar -> Typ -> HCState -> (HCState, UVar)
+hc' _ uv (UV s uv') s0@(_, new, _)
+  | uv == uv' = hcNew uv (UV s uvn) s0
+  where uvn = length new
+hc' old uv (UV _ uv') s0 = do
+  let (s1, uvn) = hc old uv' s0
+  hcFin uv uvn s1
+hc' _ uv (RV s v) s0 =
+  hcNew uv (RV s v) s0
+hc' _ uv e@(TTuple _ _) s0 =
+  hcAdd uv e s0
+hc' _ uv Type s =
+  hcAdd uv Type s
+hc' old uv (TArrow s a b) s0 = do
+  let (s1, uva) = hc old a s0
+      (s2, uvb) = hc old b s1
+  hcAdd uv (TArrow s uva uvb) s2
+hc' old uv (TApp s vs) s0 = do
+  case hcs old vs s0 of
+    (s1@(_, new, _), uvf:uvs)
+      | TApp _ vs' <- new!uvf ->
+        hcAdd uv (TApp s (vs' <> uvs)) s1
+    (s1, uvs) -> hcAdd uv (TApp s uvs) s1
+hc' old uv (TScheme s uvs uv') s0 = do
+  case hcs old (uv':uvs) s0 of
+    (_, []) -> error "impossible hc'"
+    (s1, uvn:uvsn) ->
+      hcAdd uv (TScheme s uvsn uvn) s1
+
+hcs :: Vec Typ -> [UVar] -> HCState -> (HCState, [UVar])
+hcs old uvs s = do
+  let arg a (sk, uvsk) = fmap (:uvsk) $ hc old a sk
+  foldr arg (s, []) uvs
+
+hcFin :: UVar -> UVar -> HCState -> (HCState, UVar)
+hcFin uv uvn (toNew, new, mapping) =
+  ((writeVec toNew uv uvn, new, mapping), uvn)
+
+hcNew :: UVar -> Typ -> HCState -> (HCState, UVar)
+hcNew uv typ (toNew, new, mapping) = do
+  let uvn = length new
+  hcFin uv uvn (toNew, push new typ, mapping)
+
+hcAdd :: UVar -> Typ -> HCState -> (HCState, UVar)
+hcAdd uv typ s@(toNew, new, mapping)
+  | Just uvn <- M.lookup typ mapping =
+    hcFin uv uvn s
+  | otherwise = do
+    let uvn = length new
+    hcNew uv typ (toNew, new, M.insert typ uvn mapping)
+
+------------------------------------------------------------
+-- Anti-unification: Compute least generalization of
+-- use sites.  These must be keyed by skolem variables
+-- (ie generic calls should be distinguished).
+--
+-- Unlike fully general anti-unification, here we
+-- assume we're also passed an original polymorphic
+-- type scheme which we're generalizing.  That's
+-- important in propagating changes to other signatures
+-- in the program.
+
+antiUnify :: UVar -> [UVar] -> TCM UVar
+antiUnify sig uvs =
+  withUngen sig $ \sig' ->
+    au0 sig' uvs mempty >> pure ()
+
+withUngen :: UVar -> (UVar -> TCM ()) -> TCM UVar
+withUngen uv act = do
+  (_, scheme) <- getU uv
+  case scheme of
+    TScheme s vs sig -> gen s $ do
+      unGen (S.fromList vs) sig
+      act sig
+      pure sig
+    _ -> error "antiUnify non-schema"
+
+-- Un-generalize the set of variables s in the given type.
+unGen :: Set UVar -> UVar -> TCM ()
+unGen s = ug where
+  ug :: UVar -> TCM ()
+  ug = uvFunc ug'
+  ug' :: UVar -> Typ -> TCM ()
+  ug' uv (RV sp _)
+    | uv `S.member` s = assignU uv (UV sp uv) >> pure ()
+  ug' _ (TApp _ es) = traverse_ ug es
+  ug' _ (TArrow _ a b) = traverse_ ug [a,b]
+  ug' _ _ = pure ()
+
+type AUMap = Map [UVar] UVar
+
+assignSafe :: HasCallStack => UVar -> UVar -> TCM UVar
+assignSafe uv new = do
+  -- Use unification to get ordering, equality, and level right.
+  ok <- uv === new
+  when (not ok) $ error "assignSafe not ok"
+  pure uv
+
+-- AntiUnify vars, storing in sig and hash consing as we go.
+au0 :: HasCallStack => UVar -> [UVar] -> AUMap -> TCM AUMap
+au0 _ [] _ = error "antiUnify []"
+au0 sig uvs m = au1 sig (filter (/= sig) uvs) m
+
+au1 :: HasCallStack => UVar -> [UVar] -> AUMap -> TCM AUMap
+au1 _ [] m = pure m
+au1 sig (uv:uvs) m
+  | all (==uv) uvs = assignSafe sig uv >> pure m
+au1 sig uvs m
+  | Just uv <- M.lookup uvs m = assignSafe sig uv >> pure m
+au1 sig uvs m = do
+  ts <- traverse getU uvs
+  au sig ts m
+
+au :: HasCallStack => UVar -> [(UVar, Typ)] -> AUMap -> TCM AUMap
+au _ [] _ = error "au [], shouldn't happen."
+au sig ts@((_, UV _ _) : _) m = newAU sig ts m -- Distinguished by uv
+au sig ts@((_, RV _ _) : _) m = newAU sig ts m -- Ditto
+au sig ts@((_, TTuple _ _) : _) m = newAU sig ts m -- And again.
+au sig ts@((_, Type) : _) m = newAU sig ts m -- Only one of these, others differ.
+au sig ts@((_, (TArrow s _ _)) : _) m = do
+  let ab = [(a, b) | (_, TArrow _ a b) <- ts]
+  if length ab == length ts then do
+    (a', b') <- uncurry (expectArrow s) =<< getU sig
+    m' <- au0 a' (fmap fst ab) m
+    m'' <- au0 b' (fmap snd ab) m'
+    newAU sig ts m''
+  else
+    newAU sig ts m
+au sig ts@((_, TApp s vs0) : _) m = do
+  let vss = [vs | (_, TApp _ vs) <- ts]
+      one :: (UVar, [UVar]) -> TCM AUMap -> TCM AUMap
+      one (sig', vs) act = do
+        m' <- act
+        au0 sig' vs m'
+  if length vss == length ts && all ((length vs0==) . length) vss then do
+    as <- uncurry (expectTApp s (length vs0)) =<< getU sig
+    foldr one (pure m) $ zip as $ transpose vss
+  else
+    newAU sig ts m
+au _ ((_, TScheme _ _ _) : _) _ = error "au TScheme"
+
+newAU :: UVar -> [(UVar, Typ)] -> AUMap -> TCM AUMap
+newAU sig ts m =
+  pure (M.insert (fmap fst ts) sig m)
+
 ------------------------------------------------------------
 -- Generalization
 
@@ -481,6 +637,25 @@ expectTuple s n uv _ = do
   typeError [s] (" got "<>show n<>" tuple vs "<>showPp st)
   newUV s
 
+expectTApp :: HasCallStack => Span -> Int -> UVar -> Typ -> TCM [UVar]
+expectTApp s arity _ (TApp s' as) = do
+  let l = length as
+  case (compare arity l, as) of
+    (EQ, _) -> pure as
+    (LT, _) -> do
+      let (bs, cs) = splitAt (l - arity + 1) as
+      uv' <- newUV' (TApp s' bs)
+      pure (uv':cs)
+    (GT, []) -> error "empty TApp"
+    (GT, f:cs) -> do
+      bs <- uncurry (expectTApp s (arity - l + 1)) =<< getU f
+      pure (bs <> cs)
+expectTApp s arity uv (UV _ _) = do
+  as <- replicateM arity (newUV s)
+  assignU uv (TApp s as)
+  pure as
+expectTApp _ _ _ _ = error "expectTApp not TApp or UV"
+
 -- Expect a list type, return the type and its element type.
 expectList :: Span -> UVar -> Typ -> TCM (UVar, UVar)
 expectList s uv (TApp _ [l0, e]) = do
@@ -492,6 +667,14 @@ expectList s uv (TApp _ [l0, e]) = do
     mkList s uv
 expectList s uv _ = mkList s uv
 
+mkList :: Span -> UVar -> TCM (UVar, UVar)
+mkList s uv = do
+  l <- getRV s "[]"
+  e <- newUV s
+  uv' <- newUV' (TApp s [l, e])
+  ruv <- tcFin id s " got list " uv' uv
+  pure (ruv, e)
+
 -- Expect an arrow type, return its operand and result.
 expectArrow :: HasCallStack => Span -> UVar -> Typ -> TCM (UVar, UVar)
 expectArrow _ _ (TArrow _ a b) = pure (a, b)
@@ -501,14 +684,6 @@ expectArrow s uv _ = do
   r <- newUV' (TArrow s a b)
   _ <- tcFin id s " more arguments than expected " r uv
   return (a, b)
-
-mkList :: Span -> UVar -> TCM (UVar, UVar)
-mkList s uv = do
-  l <- getRV s "[]"
-  e <- newUV s
-  uv' <- newUV' (TApp s [l, e])
-  ruv <- tcFin id s " got list " uv' uv
-  pure (ruv, e)
 
 -- Given an Exp representing a type, intern it.
 mkTy :: Exp -> TCM UVar
@@ -1005,6 +1180,106 @@ bindSigM s _ Nothing = newUV s
 bindSigM _ v (Just e) = bindSig v e
 
 ------------------------------------------------------------
+-- Minimal polymorphism
+-- As in Bjorner's Minimal Typing Derivations, ML workshop '94
+-- (His algorithm M, not to be confused with the folklore
+-- algorithm M we use for type inference above!)
+
+newtype JoinMap k v = JM (Map k v) deriving (Eq, Ord)
+
+instance (Ord k, Semigroup v) => Semigroup (JoinMap k v) where
+  JM a <> JM b = JM $ M.unionWith (<>) a b
+
+instance (Ord k, Semigroup v) => Monoid (JoinMap k v) where
+  mempty = JM mempty
+
+-- NOTE TODO: This assumes alpha-uniqueness of function names.
+-- That's not *actually* something we have today.
+minPoly :: Vec UVar -> Vec Typ -> Defs -> (Vec Typ, Defs)
+minPoly renames typs ds = do
+  let -- Collect schemes and occurrences
+      mp (Asc _ (Id _ _ _ i) (Const _ (EInt uv0))) m = do
+        let uv = fromInteger uv0
+            uv' = renames!uv
+        case typs!uv' of
+          TScheme _ _ _ -> (M.singleton i uv', mempty) <> m
+          _ -> (mempty, JM $ M.singleton i (S.singleton uv')) <> m
+      mp _ m = m
+      (pbs, JM occs) = gather mp (const id) ds
+      -- For each scheme and its occurrences in reverse
+      -- unification order, antiUnify.  Reverse order ensures
+      -- later variable instantiations affect earlier signatures.
+      minify (i, sig, sigs) = do
+        sig0 <- ppTy sig
+        res <- antiUnify sig sigs
+        resS <- ppTy res
+        tracew True [show i, "orig", showPp sig0, "new", showPp resS] $
+          pure (i,res)
+      st = TCState mempty mempty typs (BV.replicate (length typs) 0) []
+      todo = sortOn (\(_, a, _)  -> Down a) $
+        [ (i, sig, S.toList sigs)
+        | (i, sig) <- M.toList pbs,
+          Just sigs <- [M.lookup i occs]]
+      (newPbs0, st') = runState (traverse minify todo) st
+      -- Now replace signatures with their anti-unified equivalents.
+      typs' = u_ st'
+      newPbs = M.fromList newPbs0
+      -- FIX: replaces instantiations as well!
+      newSig (Asc s v (Const s' (EInt uv0))) = do
+        let uv = fromInteger uv0
+            uv1 = renames!uv
+            uv' =
+              case (v, typs!uv1) of
+                (Id _ _ _ i, TScheme _ _ _)
+                  | Just uv2 <- M.lookup i newPbs -> uv2
+                _ -> uv1
+        Asc s v (Const s' (EInt (fromIntegral uv')))
+      newSig e = e
+  trace (unlines ("minPoly" : fmap (\(i, uv, uvs) -> unwords [show i, ":", show uv, ";", show uvs, "->", show (newPbs M.! i)]) todo <> ["minPoly done"])) $
+    (typs',) $ bottomUp newSig id ds
+
+------------------------------------------------------------
+-- Relabeling
+
+-- When we label the code with signatures, we just record the
+-- UVar since many signature variables aren't settled until
+-- subsequent unification.  So we walk the program and expand
+-- them into types when we're done.
+
+uVarTypes :: Vec Typ -> Vec Exp
+uVarTypes typs = trace (unlines $ zipWith (\i t -> showPp (PP.int i <> ": "<> pp (fullParen t) <> "       = "<> text (show (typs!i)))) [(0::Int)..] $ IL.toList exps) exps where
+  l = length typs
+  exps = IL.fromListN l $ zipWith ut [(0::Int)..] (IL.toList typs)
+  -- Note that we're tying the knot with exps itself here.
+  ut uv (UV _ uv') | uv /= uv' = exps!uv'
+  ut uv (UV s _) = Id s Ident Var ("$uv" <> fromString (show uv))
+  ut uv (RV s "$rv") = Id s Ident Var ("$rv" <> fromString (show uv))
+  ut _  (RV s i)
+    | isVar i = Id s Ident Var i
+    | otherwise = Id s Ident Con i
+  ut _ (TTuple s 0) = Id s Ident Con "()"
+  ut _ (TTuple s 1) = Id s Ident Con "(_,)"
+  ut _ (TTuple s n) = Id s Ident Con ("(" <> replicate (n-1) ',' <> ")")
+  ut _ Type = Id noSpan Ident Con "Type"
+  ut _ (TArrow s a b) = Arrow s (exps!a) (exps!b)
+  ut uv (TApp s as@(a:at)) =
+    case typs!a of
+      TTuple _ n | length at == n -> Tuple s (fmap (exps!) at)
+      RV _ "[]" | length at == 1 -> List s (fmap (exps!) at)
+      TApp _ as' -> ut uv (TApp s (as' <> at))
+      UV _ uv' | a /= uv' -> ut uv (TApp s (uv':at))
+      _ -> App s (fmap (exps!) as)
+  ut _ (TApp _ []) = error "Empty TApp"
+  ut _ (TScheme _ _ v) = exps!v
+
+relabel :: Vec Typ -> Defs -> Defs
+relabel typs ds = bottomUp ef id ds where
+  exps = uVarTypes typs
+  ef (Asc s i (Const _ (EInt uv))) =
+    Asc s i (exps!fromInteger uv)
+  ef e = e
+
+------------------------------------------------------------
 -- Top level driver and environment setup
 
 goTop :: HasCallStack => Defs -> TCM Defs
@@ -1021,10 +1296,14 @@ goTop ds = do
 typecheckTop :: HasCallStack => (SpanPos, Defs) -> (SpanPos, Defs)
 typecheckTop (sp, ds) = do
   let st0 = TCState mempty mempty mempty mempty mempty
-      (ds', stf) = runState (goTop ds) st0
+      (ds1, stf) = runState (goTop ds) st0
+      tys = u_ stf
+      (renames, tys1) = uVarTypes tys `seq` trace (showPp ds1) $ hashCons tys
+      (tys2, ds2) = minPoly renames tys1 ds1
+      ds3 = relabel tys2 ds2
       fmt ([s], msg) = spanPrefix s sp ++ msg
       fmt (ss, msg) = concatMap (`spanPrefix` sp) ss ++ msg
   if null (errs_ stf) then
-    (sp, ds')
+    (sp, ds3)
   else
     error $ unlines $ fmap fmt $ reverse (errs_ stf)

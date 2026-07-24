@@ -48,7 +48,7 @@ doit what fs =
     Show -> mapM_ (mapM_ print . snd . snd) $ fs
     FParen -> mapM_ (print . pp . fullParen . snd) $ fs
     Desugar -> mapM_ (print . pp . fullParen . snd . desugar . validate) $ fs
-    TypeCheck -> mapM_ (print . pp . snd . typecheckTop . validate) $ fs
+    TypeCheck -> mapM_ (print . pp . fullParen . snd . typecheckTop . validate) $ fs
     All -> do
       doit Pp fs
       let vs = validate <$> fs
